@@ -5,12 +5,22 @@
   },
   "button": {
     "label": "New independent task",
-    "tooltip": "Create a timestamped folder and start a new session inside it",
+    "tooltip": "Create a timestamped folder and start a new session inside it (click the small triangle to set the task folder)",
+    "menuTooltip": "Task folder options",
     "busy": "Creating…"
   },
   "notice": {
     "created": "Independent task created: {name}",
-    "failed": "Could not create an independent task: {reason}"
+    "failed": "Could not create an independent task: {reason}",
+    "saved": "Task folder saved: {path}",
+    "reset": "Task folder reset to default"
+  },
+  "menu": {
+    "title": "Task folder",
+    "usingDefault": "Default (next to the current workspace)",
+    "chooseFolder": "Choose task folder…",
+    "chooseFolderHint": "Pick a folder, save it, and create a task there right away",
+    "resetFolder": "Reset to default"
   },
   "command": {
     "description": "Create a timestamped workspace folder and a new session inside it",

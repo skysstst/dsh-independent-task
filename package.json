@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-independent-task",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Create an isolated timestamped workspace folder and open a new session inside it in one click, then sync the workspace display title from the generated session title.",

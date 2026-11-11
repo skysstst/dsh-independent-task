@@ -4,8 +4,8 @@
  * One operation, two entry points (a slash command and an authenticated HTTP
  * route used by the sidebar button):
  *
- *   1. Pick a parent directory (the configured one, or the parent of the
- *      current workspace).
+ *   1. Pick a parent directory (explicitly requested by caller, configured,
+ *      persisted in settings, or the parent of the current workspace).
  *   2. Create a child directory named by the current wall-clock second, e.g.
  *      2026-11-11_173005. On a same-second collision it waits for the next
  *      second and re-stamps, so rapid clicks always get distinct, clean
@@ -33,6 +33,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 const MARKER_FILE = '.dsh-independent-task.json';
 const MARKER_TAG = 'dsh-independent-task';
 export const API_PATH = '/api/dsh-independent-task/create';
+export const CONFIG_API_PATH = '/api/dsh-independent-task/config';
 
 export const name = 'independent-task';
 
@@ -65,6 +66,36 @@ function configParentPath(config) {
   return typeof raw === 'string' ? raw.trim() : '';
 }
 
+/** Settings storage path in the user profile directory. */
+async function getSettingsFilePath() {
+  const base = process.env.USERPROFILE || process.env.HOME || '.';
+  const dir = join(base, '.dsh');
+  await mkdir(dir, { recursive: true });
+  return join(dir, 'dsh-independent-task.json');
+}
+
+/** Read persisted plugin settings from disk. */
+export async function readPersistedSettings() {
+  try {
+    const file = await getSettingsFilePath();
+    const text = await readFile(file, 'utf8');
+    const parsed = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Save plugin settings to disk. */
+export async function writePersistedSettings(data) {
+  try {
+    const file = await getSettingsFilePath();
+    await writeFile(file, JSON.stringify(data, null, 2), 'utf8');
+  } catch (error) {
+    warn('failed to persist settings to disk', error);
+  }
+}
+
 /**
  * Local wall-clock stamp: YYYY-MM-DD_HHmmss (local timezone, matching the GUI).
  * Seconds keep rapid successive clicks distinct without the ugly _2/_3 suffix.
@@ -82,7 +113,7 @@ function timestampName(date = new Date()) {
  *   owning the most recently created live session; falls back to the first
  *   (newest) registered workspace; then to the Host process cwd's parent.
  */
-function resolveParent(ctx, config) {
+export function resolveParent(ctx, config) {
   const configured = configParentPath(config);
   if (configured !== '') {
     return isAbsolute(configured) ? configured : resolve(process.cwd(), configured);
@@ -163,9 +194,24 @@ function warn(message, error) {
 /**
  * The single core operation. Returns the created identities or throws with a
  * human-readable reason. Both the command and the HTTP route call this.
+ * Supports explicitParent override from UI directory pickers or caller request.
  */
-export async function createIndependentTask(ctx, config) {
-  const parent = resolveParent(ctx, config);
+export async function createIndependentTask(ctx, config, explicitParent) {
+  let parent = typeof explicitParent === 'string' && explicitParent.trim() !== ''
+    ? (isAbsolute(explicitParent.trim()) ? explicitParent.trim() : resolve(process.cwd(), explicitParent.trim()))
+    : undefined;
+
+  if (!parent) {
+    const fileSettings = await readPersistedSettings();
+    if (typeof fileSettings.parentPath === 'string' && fileSettings.parentPath.trim() !== '') {
+      const p = fileSettings.parentPath.trim();
+      parent = isAbsolute(p) ? p : resolve(process.cwd(), p);
+    }
+  }
+
+  if (!parent) {
+    parent = resolveParent(ctx, config);
+  }
 
   // The parent must exist: workspaceRegistry.create resolves paths through
   // fs.realpath and rejects a nonexistent directory.
@@ -265,6 +311,24 @@ function requestAllowed(ctx, req) {
   return loopbackSocket && loopbackHost;
 }
 
+/** Helper to parse JSON body from incoming HTTP request. */
+async function readJsonBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      if (chunks.length === 0) return resolve({});
+      try {
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve(text.trim() ? JSON.parse(text) : {});
+      } catch {
+        resolve({});
+      }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
 export function apply(ctx, config) {
   // Workspace ids created by this plugin instance: lets the title listener skip
   // filesystem work for every unrelated session/title event. Also lets a
@@ -273,8 +337,8 @@ export function apply(ctx, config) {
   const markerCache = new Map();
 
   /** Create a task and remember its Workspace id for the title fast path. */
-  const createAndTrack = async () => {
-    const result = await createIndependentTask(ctx, config);
+  const createAndTrack = async (explicitParent) => {
+    const result = await createIndependentTask(ctx, config, explicitParent);
     ownedIds.add(result.workspaceId);
     return result;
   };
@@ -298,7 +362,7 @@ export function apply(ctx, config) {
   });
 
   // ---- 2. Authenticated HTTP route for the sidebar button -----------------
-  const route = {
+  const createRoute = {
     kind: 'exact',
     path: API_PATH,
     handler: async (req, res) => {
@@ -313,15 +377,66 @@ export function apply(ctx, config) {
       if (req.method !== 'POST') return json(405, { ok: false, error: 'method-not-allowed' });
       if (!requestAllowed(ctx, req)) return json(403, { ok: false, error: 'forbidden' });
       try {
-        return json(200, { ok: true, ...(await createAndTrack()) });
+        const body = await readJsonBody(req);
+        const parentOverride = typeof body?.parentPath === 'string' && body.parentPath.trim() !== ''
+          ? body.parentPath.trim()
+          : undefined;
+        return json(200, { ok: true, ...(await createAndTrack(parentOverride)) });
       } catch (error) {
         return json(500, { ok: false, error: error?.message ?? String(error) });
       }
     },
   };
-  const routeOff = ctx.webServer.register(route);
+  const createRouteOff = ctx.webServer.register(createRoute);
 
-  // ---- 3. Session title -> Workspace display title ------------------------
+  // ---- 3. Settings configuration HTTP route -------------------------------
+  const configRoute = {
+    kind: 'exact',
+    path: CONFIG_API_PATH,
+    handler: async (req, res) => {
+      const json = (status, body) => {
+        res.writeHead(status, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'referrer-policy': 'no-referrer',
+        });
+        res.end(JSON.stringify(body));
+      };
+      if (!requestAllowed(ctx, req)) return json(403, { ok: false, error: 'forbidden' });
+
+      if (req.method === 'GET') {
+        const fileSettings = await readPersistedSettings();
+        const configured = configParentPath(config);
+        const effectiveParent = typeof fileSettings.parentPath === 'string'
+          ? fileSettings.parentPath
+          : configured;
+        const defaultParent = resolveParent(ctx, config);
+        return json(200, {
+          ok: true,
+          parentPath: effectiveParent,
+          defaultParent,
+        });
+      }
+
+      if (req.method === 'POST') {
+        try {
+          const body = await readJsonBody(req);
+          const next = {
+            parentPath: typeof body?.parentPath === 'string' ? body.parentPath.trim() : '',
+          };
+          await writePersistedSettings(next);
+          return json(200, { ok: true, ...next, defaultParent: resolveParent(ctx, config) });
+        } catch (error) {
+          return json(500, { ok: false, error: error?.message ?? String(error) });
+        }
+      }
+
+      return json(405, { ok: false, error: 'method-not-allowed' });
+    },
+  };
+  const configRouteOff = ctx.webServer.register(configRoute);
+
+  // ---- 4. Session title -> Workspace display title ------------------------
   // session/title is a durable, log-only event; session/event is emitted for
   // every committed append, so this works across resume and replay too.
   const eventOff = ctx.on('session/event', (session, event) => {
@@ -343,10 +458,11 @@ export function apply(ctx, config) {
   });
 
   // Everything is registered inside ctx.effect: unloading the plugin disposes
-  // the command, the route, and the listener in reverse order, automatically.
+  // the command, the routes, and the listener in reverse order, automatically.
   ctx.effect(function* () {
     yield commandOff;
-    yield routeOff;
+    yield createRouteOff;
+    yield configRouteOff;
     yield eventOff;
   }, 'independent-task lifecycle');
 }

@@ -5,12 +5,22 @@
   },
   "button": {
     "label": "新建独立任务",
-    "tooltip": "创建时间戳目录，并在其中开启一个新会话",
+    "tooltip": "创建时间戳目录并在其中开启新会话（点击右侧小三角设置任务目录）",
+    "menuTooltip": "任务目录选项",
     "busy": "正在创建…"
   },
   "notice": {
     "created": "已创建独立任务：{name}",
-    "failed": "创建独立任务失败：{reason}"
+    "failed": "创建独立任务失败：{reason}",
+    "saved": "任务目录已保存：{path}",
+    "reset": "已恢复默认任务目录"
+  },
+  "menu": {
+    "title": "任务目录",
+    "usingDefault": "默认（当前工作区同级目录）",
+    "chooseFolder": "选择任务目录…",
+    "chooseFolderHint": "选定后立即保存，并在此目录新建一个独立任务",
+    "resetFolder": "恢复默认目录"
   },
   "command": {
     "description": "创建时间戳工作区目录，并在其中开启一个新会话",

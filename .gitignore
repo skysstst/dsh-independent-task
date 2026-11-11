@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build / cache
+dist/
+*.log
+.plugin-manager/
+*.tsbuildinfo
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Test scratch
+*.tmp
+audit-test.mjs
+smoke-test.mjs

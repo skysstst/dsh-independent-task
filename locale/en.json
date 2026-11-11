@@ -1,0 +1,24 @@
+{
+  "meta": {
+    "title": "Independent tasks",
+    "description": "Launch a new session inside a fresh timestamped workspace folder, and keep the workspace display title in sync with the generated session title."
+  },
+  "button": {
+    "label": "New independent task",
+    "tooltip": "Create a timestamped folder and start a new session inside it",
+    "busy": "Creating…"
+  },
+  "notice": {
+    "created": "Independent task created: {name}",
+    "failed": "Could not create an independent task: {reason}"
+  },
+  "command": {
+    "description": "Create a timestamped workspace folder and a new session inside it",
+    "hint": "[optional first task description]",
+    "success": "Independent task created in {path} (workspace {workspaceId}, session {sessionId}).",
+    "failure": "Could not create an independent task: {reason}"
+  },
+  "settings": {
+    "parentPath": "Parent folder for timestamped task directories (blank = the parent folder of the current workspace)"
+  }
+}

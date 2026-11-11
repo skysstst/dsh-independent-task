@@ -1,0 +1,5 @@
+# Independent task workspaces: one Host+Client plugin row.
+- insert:
+    - id: independent-task
+      name: '@local/dsh-independent-task'
+      config: {}

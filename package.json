@@ -1,0 +1,66 @@
+{
+  "name": "@local/dsh-independent-task",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Create an isolated timestamped workspace folder and open a new session inside it in one click, then sync the workspace display title from the generated session title.",
+  "icon": "icon.svg",
+  "license": "MIT",
+  "author": "skysstst",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "bundle",
+    "workspace",
+    "session",
+    "productivity"
+  ],
+  "homepage": "https://github.com/skysstst/dsh-independent-task#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skysstst/dsh-independent-task.git"
+  },
+  "bugs": {
+    "url": "https://github.com/skysstst/dsh-independent-task/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "vendor/*.mjs",
+    "vendor/LICENSE.*",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller"
+      ]
+    }
+  },
+  "engines": { "dsh": ">=0.2.2-rc.1" }
+}

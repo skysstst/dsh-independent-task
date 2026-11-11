@@ -1,0 +1,24 @@
+{
+  "meta": {
+    "title": "新建独立任务",
+    "description": "在新建的时间戳目录中启动独立会话，并把工作区显示标题同步为自动生成的会话标题。"
+  },
+  "button": {
+    "label": "新建独立任务",
+    "tooltip": "创建时间戳目录，并在其中开启一个新会话",
+    "busy": "正在创建…"
+  },
+  "notice": {
+    "created": "已创建独立任务：{name}",
+    "failed": "创建独立任务失败：{reason}"
+  },
+  "command": {
+    "description": "创建时间戳工作区目录，并在其中开启一个新会话",
+    "hint": "[可选的首条任务描述]",
+    "success": "已在 {path} 创建独立任务（工作区 {workspaceId}，会话 {sessionId}）。",
+    "failure": "创建独立任务失败：{reason}"
+  },
+  "settings": {
+    "parentPath": "时间戳任务目录的父路径（留空 = 当前工作区的父目录）"
+  }
+}

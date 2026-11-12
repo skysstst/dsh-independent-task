@@ -1,7 +1,76 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Independent tasks">
-  <rect x="6" y="6" width="52" height="52" rx="12" fill="#2f6fd0"/>
-  <path d="M18 24a4 4 0 0 1 4-4h7l4 5h9a4 4 0 0 1 4 4v15a4 4 0 0 1-4 4H22a4 4 0 0 1-4-4Z" fill="#ffffff" opacity="0.95"/>
-  <path d="M32 30v14M25 37h14" stroke="#2f6fd0" stroke-width="3.5" stroke-linecap="round"/>
-  <circle cx="47" cy="17" r="7" fill="#ffd166"/>
-  <path d="M44.5 17h5M47 14.5v5" stroke="#7a4b00" stroke-width="2" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" width="180" height="180" role="img" aria-label="Independent tasks">
+  <defs>
+    <!-- Background squircle gradient (DeepSeek Harness tech blue) -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#1e3a8a"/>
+    </linearGradient>
+
+    <!-- Folder back flap gradient (golden amber) -->
+    <linearGradient id="folderBack" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+
+    <!-- Paper interior sheet -->
+    <linearGradient id="paperSheet" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e2e8f0"/>
+    </linearGradient>
+
+    <!-- Folder front flap gradient (warm bright gold 📂) -->
+    <linearGradient id="folderFront" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a"/>
+      <stop offset="15%" stop-color="#fde047"/>
+      <stop offset="100%" stop-color="#eab308"/>
+    </linearGradient>
+
+    <!-- Badge gradient -->
+    <linearGradient id="badgeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f8fafc"/>
+    </linearGradient>
+
+    <!-- Drop shadows -->
+    <filter id="tileShadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.35"/>
+    </filter>
+
+    <filter id="frontShadow" x="-10%" y="-10%" width="125%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#78350f" flood-opacity="0.28"/>
+    </filter>
+
+    <filter id="badgeShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#78350f" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- 1. Background Squircle Tile -->
+  <rect x="8" y="8" width="164" height="164" rx="36" fill="url(#bgGrad)" filter="url(#tileShadow)"/>
+  <!-- Highlight border -->
+  <rect x="9" y="9" width="162" height="162" rx="35" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.25"/>
+
+  <!-- 2. Folder Back Layer with Tab -->
+  <path d="M36 50 C36 46 39 43 43 43 L72 43 C76 43 80 46 82 50 L89 60 L137 60 C141 60 144 63 144 67 L144 130 C144 134 141 137 137 137 L43 137 C39 137 36 134 36 130 Z"
+        fill="url(#folderBack)"/>
+
+  <!-- 3. Interior Paper Sheet peeking out -->
+  <rect x="44" y="52" width="92" height="42" rx="4" fill="url(#paperSheet)" opacity="0.95"/>
+  <line x1="52" y1="60" x2="84" y2="60" stroke="#94a3b8" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="52" y1="67" x2="72" y2="67" stroke="#cbd5e1" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- 4. Folder Front Flap (Classic 📂 perspective / angled pocket) -->
+  <path d="M32 72 C32 68 35 65 39 65 L141 65 C145 65 148 68 148 72 L145 131 C145 135 142 138 138 138 L42 138 C38 138 35 135 35 131 Z"
+        fill="url(#folderFront)" filter="url(#frontShadow)"/>
+
+  <!-- Subtle front flap top highlight line -->
+  <path d="M37 67 L143 67" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-opacity="0.6"/>
+
+  <!-- 5. Center Badge with "+" for New Folder -->
+  <circle cx="90" cy="103" r="23" fill="url(#badgeGrad)" filter="url(#badgeShadow)"/>
+  <circle cx="90" cy="103" r="22.5" fill="none" stroke="#fde047" stroke-width="1.5" stroke-opacity="0.7"/>
+
+  <!-- Bold Plus (+) symbol -->
+  <path d="M90 91 L90 115 M78 103 L102 103"
+        stroke="#1d4ed8" stroke-width="5" stroke-linecap="round"/>
 </svg>

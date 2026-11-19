@@ -43,9 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The plugin only ever **reads** DSH's per-session draft storage
   (`dsh.conversation.*`); it never writes it. Harness already persists each
-  session's draft, so mirroring it a second time is redundant and was the source
-  of drafts reappearing after a send in some development builds. No such build
-  was ever published, so there is nothing to fix for users of 1.1.0.
+  session's draft, so mirroring it a second time would be redundant.
 
 ## [1.1.0] - 2026-11-11
 

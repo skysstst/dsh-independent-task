@@ -214,6 +214,14 @@ function warn(message, error) {
   console.warn(`[independent-task] ${message}`, error);
 }
 
+/** Warn about a given condition at most once per process. */
+const warnedOnce = new Set();
+function warnOnce(key, message, error) {
+  if (warnedOnce.has(key)) return;
+  warnedOnce.add(key);
+  warn(message, error);
+}
+
 /**
  * The single core operation. Returns the created identities or throws with a
  * human-readable reason. Both the command and the HTTP route call this.
@@ -575,6 +583,38 @@ export function apply(ctx, config) {
         if (sid !== undefined) {
           if (!Array.isArray(entity.sessionIds) || !entity.sessionIds.includes(sid)) {
             return json(409, { ok: false, error: 'session-mismatch' });
+          }
+        }
+
+        // 3. Safety net, independent of the Client: refuse to delete a task
+        //    whose log already contains a real user turn. A stale pending list
+        //    (another window, a reload mid-flight) must never delete a session
+        //    the user is actually working in.
+        //
+        //    This guard fails CLOSED. If the surface cannot be read we do not
+        //    know whether turns exist, and "unknown" must not mean "safe to
+        //    delete" on an irreversible path - so the request is refused and
+        //    the Client retries later.
+        if (sid !== undefined) {
+          const query = ctx.get('sessionQuery');
+          if (query === undefined || typeof query.readSurface !== 'function') {
+            warnOnce(
+              'sessionQuery-unavailable',
+              'cleanup refused: the sessionQuery service is unavailable, so the session cannot be verified as empty',
+            );
+            return json(503, { ok: false, error: 'surface-unavailable' });
+          }
+          let hasTurns;
+          try {
+            const surface = await query.readSurface(sid);
+            const events = Array.isArray(surface?.events) ? surface.events : [];
+            hasTurns = events.some((event) => event?.type === 'user/message');
+          } catch (surfaceError) {
+            warn('cleanup refused: the session surface could not be read', surfaceError);
+            return json(409, { ok: false, error: 'surface-unreadable' });
+          }
+          if (hasTurns) {
+            return json(400, { ok: false, error: 'session-has-messages' });
           }
         }
 

@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-independent-task",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
-  "description": "Create an isolated timestamped workspace folder and open a new session inside it in one click, then sync the workspace display title from the generated session title.",
+  "description": "Create a timestamped workspace folder and a session inside it in one click, keep typed drafts alive, delete tasks that were never used, and sync the workspace display title from the generated session title.",
   "icon": "icon.svg",
   "license": "MIT",
   "author": "skysstst",
@@ -63,5 +63,5 @@
       ]
     }
   },
-  "engines": { "dsh": ">=0.2.2-rc.1" }
+  "engines": { "dsh": ">=0.2.2-rc.3" }
 }

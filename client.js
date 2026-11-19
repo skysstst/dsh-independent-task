@@ -32,6 +32,18 @@
  *
  * Every registration, timer and dictionary is owned by ctx.effect /
  * ctx.slots.inject, so unloading the plugin removes all of it.
+ *
+ * Lifecycle of a task this plugin creates (1.2.0):
+ *
+ *   created ──┬── user shows any intent ──► kept forever (tracking dropped)
+ *             └── nothing typed, view left ──► archived + folder deleted
+ *
+ * "Intent" is deliberately broad — a sent turn, a running turn, a persisted
+ * draft (text / reference / quote / attachment / command), or anything sitting
+ * in the live composer — because the cost of a false positive is a folder the
+ * user deletes by hand, while a false negative destroys work. The plugin never
+ * writes DSH's draft storage: Harness already persists each session's draft,
+ * and mirroring it a second time made sent messages reappear as leftovers.
  */
 
 window.__ModuleLoader__.load({
@@ -46,6 +58,7 @@ window.__ModuleLoader__.load({
     const NS = 'independentTask';
     const PANEL_ID = 'independent-task-new';
     const STORAGE_KEY = 'dsh.independent-task.settings';
+    const PENDING_STORAGE_KEY = 'dsh.independent-task.pending';
 
     const en = {
       label: 'New independent task',
@@ -161,6 +174,193 @@ window.__ModuleLoader__.load({
           }
         };
 
+        // ---- Empty task auto-cleanup & draft preservation -------------------
+        // Reads stay authoritative (localStorage is shared with the host and any
+        // other window), but writes are suppressed when the tracked set is
+        // unchanged: the check runs on every session-list frame, and flushing a
+        // redundant write per frame is pure churn.
+        let pendingSignature = null;
+
+        const signatureOf = (tasks) => tasks
+          .map((task) => `${task.sessionId}:${task.opened ? 1 : 0}:${task.attempts ?? 0}:${task.path}`)
+          .join('|');
+
+        const readPendingTasks = () => {
+          try {
+            const raw = localStorage.getItem(PENDING_STORAGE_KEY);
+            if (raw === null) {
+              pendingSignature = '';
+              return [];
+            }
+            const list = JSON.parse(raw);
+            const tasks = Array.isArray(list) ? list : [];
+            pendingSignature = signatureOf(tasks);
+            return tasks;
+          } catch {
+            pendingSignature = '';
+            return [];
+          }
+        };
+
+        const savePendingTasks = (tasks) => {
+          const signature = signatureOf(tasks);
+          if (signature === pendingSignature) return;
+          pendingSignature = signature;
+          try {
+            if (tasks.length === 0) localStorage.removeItem(PENDING_STORAGE_KEY);
+            else localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify(tasks));
+          } catch {
+            /* quota or storage disabled */
+          }
+        };
+
+        const trackPendingTask = (task) => {
+          const list = readPendingTasks().filter((t) => t.sessionId !== task.sessionId);
+          list.push({
+            workspaceId: task.workspaceId,
+            sessionId: task.sessionId,
+            path: task.path,
+            opened: false,
+            createdAt: Date.now(),
+          });
+          savePendingTasks(list);
+        };
+
+        /**
+         * True when a plugin-created session already carries user intent.
+         * Reads only; never writes the composer store (writing there makes a
+         * sent message reappear as a leftover draft).
+         */
+        const checkUserContent = (sessionId) => {
+          // 1. Session turn / run status: a sent turn flips blank, a live turn runs.
+          try {
+            const summary = ctx.get('sessions')?.list?.getSnapshot?.()?.byId?.[sessionId];
+            if (summary) {
+              if (summary.blank === false || summary.running === true) return true;
+            }
+          } catch {}
+
+          // 2. DSH's own per-session draft store; the composer persists every keystroke here.
+          try {
+            const raw = localStorage.getItem('dsh.conversation.' + sessionId);
+            if (raw) {
+              const stored = JSON.parse(raw);
+              const draft = stored?.draft;
+              if (typeof draft === 'string' && draft.trim() !== '') return true;
+              if (typeof draft === 'object' && draft !== null) {
+                if (typeof draft.text === 'string' && draft.text.trim() !== '') return true;
+                if (Array.isArray(draft.references) && draft.references.length > 0) return true;
+                if (Array.isArray(draft.quotes) && draft.quotes.length > 0) return true;
+                if (Array.isArray(draft.attachmentIds) && draft.attachmentIds.length > 0) return true;
+                if (draft.command && typeof draft.command.token === 'string' && draft.command.token.trim() !== '') return true;
+              }
+            }
+          } catch {}
+
+          // 3. Live composer DOM — only while THIS session is the visible one. The
+          // mounted editor always belongs to the current session, so reading it for
+          // a background session would be a false positive. The composer's own
+          // element carries `data-composer-input` (see ComposerContentEditable);
+          // a bare `[contenteditable]` search could hit an unrelated field.
+          if (getCurrentSessionId() === sessionId) {
+            try {
+              const editable = document.querySelector('[data-composer-input]')
+                ?? document.querySelector('[contenteditable="true"]');
+              if (editable) {
+                const text = (editable.innerText || editable.textContent || '').trim();
+                if (text !== '') return true;
+                if (editable.querySelector('img, [data-lexical-decorator], [data-reference], [data-command]')) return true;
+              }
+            } catch {}
+          }
+
+          return false;
+        };
+
+        /**
+         * Keep a plugin-created session alive in the sidebar before its first
+         * send. DSH hides every not-yet-engaged ("blank") session that is not
+         * current, so typing without sending would make the row vanish.
+         *
+         * Scope: only sessions this plugin created and still tracks as pending,
+         * and only once per session — repeating the mutation on every keystroke
+         * would force a re-projection each time.
+         *
+         * The three writes below are exactly the ones DSH performs when a real
+         * prompt is accepted (`onEngaged`), and the manager re-projects the list
+         * itself right after. The projection store is deliberately NOT touched:
+         * writing a snapshot built from a read that already happened races with
+         * the host's own projection frames, and a stale snapshot written back
+         * that way freezes the sidebar on an old view until reload.
+         */
+        const engagedSessions = new Set();
+        /** Cap on remembered ids: a long-lived page must not grow without bound. */
+        const ENGAGED_MEMORY_LIMIT = 512;
+        const rememberEngaged = (sessionId) => {
+          engagedSessions.add(sessionId);
+          if (engagedSessions.size <= ENGAGED_MEMORY_LIMIT) return;
+          // Never evict the session we just recorded: a repeat visit would then
+          // re-run the three host writes this set exists to make once-only.
+          for (const id of engagedSessions) {
+            if (engagedSessions.size <= ENGAGED_MEMORY_LIMIT) break;
+            if (id !== sessionId) engagedSessions.delete(id);
+          }
+        };
+        const markSessionEngaged = (sessionId) => {
+          if (!sessionId || engagedSessions.has(sessionId)) return;
+          if (!readPendingTasks().some((task) => task.sessionId === sessionId)) return;
+          rememberEngaged(sessionId);
+          try {
+            const manager = ctx.get('sessions')?.manager;
+            if (!manager) return;
+            if (manager.engagedSessions && typeof manager.engagedSessions.add === 'function') {
+              manager.engagedSessions.add(sessionId);
+            }
+            if (typeof manager.recordMutation === 'function') {
+              manager.recordMutation({ kind: 'engaged', sessionId });
+            }
+            if (manager.sessions && typeof manager.sessions.get === 'function') {
+              manager.sessions.get(sessionId)?.handleBlank?.(false);
+            }
+          } catch (error) {
+            engagedSessions.delete(sessionId);
+            console.warn('[independent-task] markSessionEngaged failed:', error);
+          }
+        };
+
+        const getCurrentSessionId = () => {
+          // Preferred source: the public session-list snapshot. `retainedBy
+          // .mainView` is exactly what the host's own `publishMain` uses to
+          // decide which session owns the main view, so it carries the same
+          // meaning without reaching into a private field. Only an unambiguous
+          // winner is accepted — with several sessions retained we cannot tell
+          // which one the user sees, and a guess here could read as "left".
+          try {
+            const byId = ctx.get('sessions')?.list?.getSnapshot?.()?.byId;
+            if (byId) {
+              const retained = Object.values(byId)
+                .filter((row) => (row?.retainedBy?.mainView ?? 0) > 0)
+                .map((row) => row.id)
+                .filter((id) => typeof id === 'string' && id !== '');
+              if (retained.length === 1) return retained[0];
+            }
+          } catch {}
+          // Best-effort: the navigation controller keeps this store private, so
+          // it may be absent (or renamed) at runtime. Never required.
+          try {
+            const sel = ctx.uiWorkspace?.selection?.getSnapshot?.();
+            if (typeof sel?.sessionId === 'string' && sel.sessionId !== '') return sel.sessionId;
+          } catch {}
+          try {
+            const raw = localStorage.getItem('dsh.sessions.current');
+            if (raw) {
+              const sid = JSON.parse(raw)?.sessionId;
+              if (typeof sid === 'string' && sid !== '') return sid;
+            }
+          } catch {}
+          return null;
+        };
+
         // ---- Native folder picker ------------------------------------------
         const pickDirectory = async () => {
           try {
@@ -248,6 +448,7 @@ window.__ModuleLoader__.load({
           };
           try {
             const payload = await requestCreate(directParent);
+            trackPendingTask(payload);
             await waitForReady(payload.workspaceId, payload.sessionId);
             try {
               ctx.uiWorkspace.openSession(payload.sessionId);
@@ -256,6 +457,12 @@ window.__ModuleLoader__.load({
               console.warn('[independent-task] openSession failed, falling back:', openError);
               ctx.uiWorkspace.startSession(payload.workspaceId);
             }
+            // Deliberately NOT marking the task as opened here: `openSession` is
+            // asynchronous, so for a moment the UI still reports the previous
+            // session. `opened` therefore flips only when a check actually sees
+            // the task in the main view — that observation is what licenses the
+            // "user left an empty task" cleanup later on.
+            scheduleCheck();
             back();
           } catch (error) {
             console.warn('[independent-task] create failed:', error);
@@ -602,6 +809,61 @@ window.__ModuleLoader__.load({
             LaunchPanel,
           ),
         );
+
+        // ---- Lifecycle wiring ----------------------------------------------
+        // This block is strictly read-only towards every host store. An earlier
+        // version mirrored drafts into localStorage and wrote them back, which
+        // made a sent message reappear as leftover text; DSH already persists
+        // each session's draft itself, so the plugin must not.
+        ctx.effect(() => {
+          // No standing tick: the watchdog is armed only while a task is
+          // tracked, it only reads, and it retires itself. The previous
+          // unconditional 1s pass rewrote a host store every second and made
+          // sends appear unresponsive.
+          const offSelection = ctx.uiWorkspace?.selection?.subscribe?.(scheduleCheck);
+          const offSessions = ctx.get('sessions')?.list?.subscribe?.(scheduleCheck);
+          const offLayout = ctx.get('layout')?.panelInfo?.subscribe?.(scheduleCheck);
+
+          // Typing in a plugin-created session counts as intent: keep the row.
+          // `onInput` fires for every keystroke in the whole app, so this stays
+          // behind a single in-memory check; the storage read only happens when
+          // the plugin is actually tracking a task.
+          let inputCheckQueued = false;
+          const onInput = () => {
+            if (pendingSignature === '') return;
+            if (inputCheckQueued) return;
+            inputCheckQueued = true;
+            later(() => {
+              inputCheckQueued = false;
+              if (pendingSignature === '') return;
+              const sid = getCurrentSessionId();
+              if (!sid) return;
+              if (!readPendingTasks().some((task) => task.sessionId === sid)) return;
+              if (checkUserContent(sid)) markSessionEngaged(sid);
+            }, 150);
+          };
+
+          if (typeof window !== 'undefined') {
+            window.addEventListener('beforeunload', checkPendingTasks);
+            window.addEventListener('visibilitychange', checkPendingTasks);
+            window.addEventListener('input', onInput, true);
+            window.addEventListener('paste', onInput, true);
+          }
+
+          scheduleCheck();
+
+          return () => {
+            offSelection?.();
+            offSessions?.();
+            offLayout?.();
+            if (typeof window !== 'undefined') {
+              window.removeEventListener('beforeunload', checkPendingTasks);
+              window.removeEventListener('visibilitychange', checkPendingTasks);
+              window.removeEventListener('input', onInput, true);
+              window.removeEventListener('paste', onInput, true);
+            }
+          };
+        }, 'independent-task auto-cleanup & intent keep-alive');
       },
     };
   },

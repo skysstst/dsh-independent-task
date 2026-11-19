@@ -55,10 +55,34 @@ window.__ModuleLoader__.load({
 
     const API_PATH = '/api/dsh-independent-task/create';
     const CONFIG_PATH = '/api/dsh-independent-task/config';
+    const CLEANUP_PATH = '/api/dsh-independent-task/cleanup';
     const NS = 'independentTask';
     const PANEL_ID = 'independent-task-new';
     const STORAGE_KEY = 'dsh.independent-task.settings';
     const PENDING_STORAGE_KEY = 'dsh.independent-task.pending';
+    /** Grace period before an unopened task is judged empty (ms). */
+    const CLEANUP_GRACE_MS = 20000;
+    /**
+     * Watchdog period while at least one task is tracked (ms). The watch exists
+     * only because the UI can stay completely silent: the navigation controller
+     * keeps its selection store private, so a task created and immediately
+     * abandoned might never be looked at again. The tick is read-only and stops
+     * itself as soon as the tracked set empties (see `armWatch`).
+     */
+    const WATCH_INTERVAL_MS = 1000;
+    /**
+     * Upper bound on watchdog passes per plugin lifetime (≈1 minute at 1s).
+     * A task whose view can never be resolved must not keep a timer alive; it
+     * stays tracked and any later store event still settles it.
+     */
+    const WATCH_MAX_TICKS = 60;
+    /**
+     * Settle period after creation before an untyped task may be cleaned (ms).
+     * The freshly created session is not always the one the UI already reports
+     * as current (`openSession` is asynchronous), so without this gap the first
+     * watchdog pass could mistake that startup lag for the user leaving.
+     */
+    const CLEANUP_SETTLE_MS = 3000;
 
     const en = {
       label: 'New independent task',
@@ -224,6 +248,16 @@ window.__ModuleLoader__.load({
             createdAt: Date.now(),
           });
           savePendingTasks(list);
+          // A one-shot wake-up at the grace deadline. The check is otherwise
+          // event-driven, and a quiet UI emits no events at all — without this
+          // the grace timer would only be observed the next time something
+          // unrelated happened to change a store.
+          later(() => checkPendingTasks(), CLEANUP_GRACE_MS + 500);
+          // Track the fresh task every `WATCH_INTERVAL_MS` until it settles, so
+          // "created and immediately abandoned" is noticed even if the UI never
+          // emits another store event. A fresh task gets a fresh tick budget.
+          watchTicks = 0;
+          armWatch();
         };
 
         /**
@@ -359,6 +393,229 @@ window.__ModuleLoader__.load({
             }
           } catch {}
           return null;
+        };
+
+        /**
+         * True when the host still retains this session in the main view.
+         *
+         * An independent, public signal that the session is on screen. The
+         * cleanup decision requires BOTH this to be false AND the current id to
+         * name a different session; either one alone is a guess, and this route
+         * deletes directories.
+         */
+        const isRetainedByMainView = (sessionId) => {
+          try {
+            const row = ctx.get('sessions')?.list?.getSnapshot?.()?.byId?.[sessionId];
+            return (row?.retainedBy?.mainView ?? 0) > 0;
+          } catch {
+            return false;
+          }
+        };
+
+        const isPanelActive = () => {
+          try {
+            const panelId = ctx.get('layout')?.panelInfo?.getSnapshot?.()?.activePanelId;
+            return panelId !== null && panelId !== undefined;
+          } catch {}
+          return false;
+        };
+
+        // Re-queue a task whose cleanup did not settle. A transient failure (Host
+        // restarting, request rejected by the trust fence) must not leak the
+        // folder forever, so it is retried a couple of times before giving up.
+        const CLEANUP_RETRY_LIMIT = 3;
+
+        /** Drop one task from the persisted tracking set. */
+        const removePendingTask = (sessionId) => {
+          const list = readPendingTasks().filter((task) => task.sessionId !== sessionId);
+          savePendingTasks(list);
+        };
+
+        const retrackTask = (task) => {
+          const attempts = (task.attempts ?? 0) + 1;
+          if (attempts >= CLEANUP_RETRY_LIMIT) {
+            // Out of attempts: stop tracking so the check does not keep
+            // re-queueing it forever. The folder stays; the user can delete it
+            // by hand, and the Host logged why the last attempt failed.
+            console.warn('[independent-task] cleanup gave up after', attempts, 'attempts:', task.path);
+            removePendingTask(task.sessionId);
+            return;
+          }
+          const list = readPendingTasks().filter((t) => t.sessionId !== task.sessionId);
+          list.push({ ...task, attempts });
+          savePendingTasks(list);
+          // A retry needs its own ticks: the budget that drove the failed attempt
+          // may already be spent, and without a reset the retry would never run.
+          watchTicks = 0;
+          armWatch();
+        };
+
+        /** Sessions with a cleanup request in flight; prevents duplicate requests. */
+        const inFlightCleanup = new Set();
+
+        /**
+         * Ask the Host to delete one task.
+         *
+         * The task is removed from the tracking set only once the Host confirms,
+         * never before: a request that dies with the page (closing the tab) or
+         * that the Host defers must leave the record in place so the next check
+         * can retry it. `keepalive` lets the request survive the `beforeunload`
+         * that starts it.
+         */
+        const executeCleanup = async (task) => {
+          if (inFlightCleanup.has(task.sessionId)) return;
+          inFlightCleanup.add(task.sessionId);
+          try {
+            const response = await fetch(CLEANUP_PATH, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                workspaceId: task.workspaceId,
+                sessionId: task.sessionId,
+                path: task.path,
+              }),
+              credentials: 'same-origin',
+              keepalive: true,
+              signal: cleanupAbort.signal,
+            });
+            const payload = await response.json();
+            if (payload?.ok === true) {
+              removePendingTask(task.sessionId);
+              try {
+                localStorage.removeItem('dsh.conversation.' + task.sessionId);
+              } catch {}
+              return;
+            }
+            // A refusal means "this folder must stay under our rules": the
+            // session already has a real turn, the folder is not ours, or the
+            // inputs no longer agree. Retrying asks the Host the same question.
+            const reason = payload?.error ?? response.status;
+            if (
+              reason === 'session-has-messages' ||
+              reason === 'not-plugin-owned' ||
+              reason === 'missing-workspace' ||
+              reason === 'workspace-mismatch' ||
+              reason === 'session-mismatch' ||
+              reason === 'missing-path'
+            ) {
+              console.warn('[independent-task] cleanup refused:', reason);
+              removePendingTask(task.sessionId);
+              return;
+            }
+            console.warn('[independent-task] cleanup deferred:', reason);
+            retrackTask(task);
+          } catch (error) {
+            if (error?.name === 'AbortError') return; // plugin unloaded mid-flight
+            console.warn('[independent-task] cleanup failed:', error);
+            retrackTask(task);
+          } finally {
+            inFlightCleanup.delete(task.sessionId);
+          }
+        };
+
+        const checkPendingTasks = () => {
+          // Cheapest possible exit: the check is wired to every session-list
+          // frame, and most of the time nothing is being tracked.
+          const tasks = readPendingTasks();
+          if (tasks.length === 0) {
+            if (watchTicks !== 0) watchTicks = 0;
+            return;
+          }
+
+          const currentId = getCurrentSessionId();
+          const panelActive = isPanelActive();
+
+          // Rebuilt every pass; a dispatched cleanup keeps its entry here until
+          // the Host confirms, because `executeCleanup` is what removes it.
+          const remaining = [];
+          for (const task of tasks) {
+            const isInTaskView = currentId === task.sessionId && !panelActive;
+
+            // User intent ends the trial period: the session is a real task now,
+            // so stop tracking it (cleanup must never touch it again).
+            if (checkUserContent(task.sessionId)) {
+              markSessionEngaged(task.sessionId);
+              continue;
+            }
+
+            const age = Date.now() - (task.createdAt || 0);
+            // Leaving requires POSITIVE evidence of another session AND that the
+            // host no longer retains this one in the main view. Either signal
+            // alone can be wrong (a panel covering the view, a still-mounting
+            // session, an unresolved selection), and a wrong guess here deletes
+            // a folder.
+            const provablyElsewhere =
+              currentId !== null &&
+              currentId !== task.sessionId &&
+              !isRetainedByMainView(task.sessionId);
+
+            if (isInTaskView) {
+              task.opened = true;
+              remaining.push(task);
+            } else if (!provablyElsewhere) {
+              // Still on this session (only a panel covers it), or the current
+              // session is unknown. Either way the user has not left.
+              remaining.push(task);
+            } else if (task.opened && age > CLEANUP_SETTLE_MS) {
+              // Left the window without typing anything. `CLEANUP_SETTLE_MS`
+              // absorbs the gap where `openSession` has not resolved yet.
+              // executeCleanup owns the tracking entry from here: it removes it
+              // only after the Host confirms, so a dropped request retries.
+              remaining.push(task);
+              void executeCleanup(task);
+            } else if (!task.opened && age > CLEANUP_GRACE_MS) {
+              // Never observed on screen and already gone: the open attempt did
+              // not take, so this is an orphan of a failed create.
+              remaining.push(task);
+              void executeCleanup(task);
+            } else {
+              remaining.push(task);
+            }
+          }
+
+          savePendingTasks(remaining);
+          // Second chance while anything is still tracked. The store
+          // subscriptions above are best-effort: `uiWorkspace.selection` is not
+          // part of the documented service surface, so a quiet UI can emit no
+          // event at all between "task created" and "user left".
+          if (remaining.length > 0 || inFlightCleanup.size > 0) {
+            armWatch();
+          } else {
+            // Nothing tracked: hand the next task a fresh tick budget.
+            watchTicks = 0;
+          }
+        };
+
+        // One coalesced watchdog at a time, only while tasks are tracked. It is
+        // capped so a task whose view can never be resolved stops costing ticks;
+        // the task stays tracked and a later store event still decides it.
+        let watchArmed = false;
+        let watchTicks = 0;
+        const armWatch = () => {
+          if (watchArmed) return;
+          if (watchTicks >= WATCH_MAX_TICKS) return;
+          watchArmed = true;
+          watchTicks += 1;
+          later(() => {
+            watchArmed = false;
+            checkPendingTasks();
+          }, WATCH_INTERVAL_MS);
+        };
+
+        // Coalesce bursts: a single send flushes the session list many times,
+        // and each flush must not queue its own pass over the pending tasks.
+        let checkScheduled = false;
+        const scheduleCheck = () => {
+          // No `pendingSignature` shortcut here: the tracked set lives in
+          // localStorage and another window may have written it, so only a real
+          // read can decide. `checkPendingTasks` still exits on its first line
+          // when nothing is tracked, which costs one `getItem`.
+          if (checkScheduled) return;
+          checkScheduled = true;
+          later(() => {
+            checkScheduled = false;
+            checkPendingTasks();
+          }, 100);
         };
 
         // ---- Native folder picker ------------------------------------------
@@ -815,6 +1072,7 @@ window.__ModuleLoader__.load({
         // version mirrored drafts into localStorage and wrote them back, which
         // made a sent message reappear as leftover text; DSH already persists
         // each session's draft itself, so the plugin must not.
+        const cleanupAbort = new AbortController();
         ctx.effect(() => {
           // No standing tick: the watchdog is armed only while a task is
           // tracked, it only reads, and it retires itself. The previous
@@ -853,6 +1111,7 @@ window.__ModuleLoader__.load({
           scheduleCheck();
 
           return () => {
+            cleanupAbort.abort();
             offSelection?.();
             offSessions?.();
             offLayout?.();

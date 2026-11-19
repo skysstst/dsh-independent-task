@@ -283,19 +283,39 @@ async function ownedWorkspaceForSession(ctx, session, ownedIds, markerCache) {
 /**
  * Trust fence matching the Host's own /api route families.
  *
- * The Host's connection service is the authority when it is present. Otherwise
- * fall back to a strict loopback check: the socket must be a loopback peer AND
- * the Host header must name a loopback host exactly (no `127.0.0.10`,
- * `localhost.evil.com`, or other prefix look-alikes), and a cross-site fetch
- * is always refused. This blocks a browser page on another origin from
- * reaching the route through the user's own loopback interface.
+ * The Host's connection service is the ONLY authority when it is present: its
+ * `requestRejection` also performs browser authentication, so anything it
+ * refuses (an unauthenticated peer, a cross-site fetch, an Origin that is not
+ * the Host's own) must be refused here as well. Trusting our own rules after it
+ * said no would silently downgrade an authenticated route into an open one.
+ *
+ * Without that service we fall back to a strict loopback check: the socket must
+ * be a loopback peer AND the Host header must name a loopback host exactly (no
+ * `127.0.0.10`, `localhost.evil.com`, or other prefix look-alikes), an attached
+ * Origin must be same-authority, and any fetch metadata other than
+ * `same-origin`/`none` is refused.
  */
 function requestAllowed(ctx, req) {
   const connection = ctx.connection;
   if (connection !== undefined && typeof connection.requestRejection === 'function') {
-    if (connection.requestRejection(req) === undefined) return true;
+    return connection.requestRejection(req) === undefined;
   }
-  if (req.headers['sec-fetch-site'] === 'cross-site') return false;
+
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (fetchSite !== undefined && fetchSite !== 'same-origin' && fetchSite !== 'none') return false;
+
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin !== null) {
+    let originAuthority;
+    try {
+      const url = new URL(String(origin));
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+      originAuthority = url.host.toLowerCase();
+    } catch {
+      return false; // opaque (`null`) or malformed origins cannot be this listener
+    }
+    if (originAuthority !== String(req.headers.host ?? '').toLowerCase()) return false;
+  }
 
   const addr = String(req.socket?.remoteAddress ?? '');
   const loopbackSocket =
@@ -311,21 +331,42 @@ function requestAllowed(ctx, req) {
   return loopbackSocket && loopbackHost;
 }
 
+/** Largest request body the plugin routes will buffer (bytes). */
+const MAX_BODY_BYTES = 64 * 1024;
+
 /** Helper to parse JSON body from incoming HTTP request. */
 async function readJsonBody(req) {
   return new Promise((resolve) => {
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let size = 0;
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      resolve(value);
+    };
+    req.on('data', (c) => {
+      if (done) return;
+      size += c.length;
+      // Refuse oversized bodies instead of buffering them: this listener is
+      // reachable from any loopback process.
+      if (size > MAX_BODY_BYTES) {
+        req.destroy();
+        finish({});
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
-      if (chunks.length === 0) return resolve({});
+      if (chunks.length === 0) return finish({});
       try {
         const text = Buffer.concat(chunks).toString('utf8');
-        resolve(text.trim() ? JSON.parse(text) : {});
+        finish(text.trim() ? JSON.parse(text) : {});
       } catch {
-        resolve({});
+        finish({});
       }
     });
-    req.on('error', () => resolve({}));
+    req.on('error', () => finish({}));
   });
 }
 

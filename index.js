@@ -26,14 +26,15 @@
 // bare imports from its real checkout, which has no node_modules. A relative
 // import keeps this plugin self-contained in every profile.
 import z from './vendor/schemastery.mjs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 /** Marker written inside directories this plugin owns, so only they get titles synced. */
 const MARKER_FILE = '.dsh-independent-task.json';
 const MARKER_TAG = 'dsh-independent-task';
 export const API_PATH = '/api/dsh-independent-task/create';
 export const CONFIG_API_PATH = '/api/dsh-independent-task/config';
+export const CLEANUP_API_PATH = '/api/dsh-independent-task/cleanup';
 
 export const name = 'independent-task';
 
@@ -182,6 +183,28 @@ async function hasMarker(path) {
   try {
     const text = await readFile(join(path, MARKER_FILE), 'utf8');
     return JSON.parse(text).tag === MARKER_TAG;
+  } catch {
+    return false;
+  }
+}
+
+/** Directory names this plugin mints: `YYYY-MM-DD_HHmmss`. */
+const TIMESTAMP_DIR_RE = /^\d{4}-\d{2}-\d{2}_\d{6}$/;
+
+/**
+ * Stricter ownership check used by the destructive cleanup route.
+ *
+ * The plain `hasMarker` answers "does this folder claim to be mine", which is
+ * not the same question once a route recurses with `rm -rf`: copying a 30-byte
+ * JSON into any folder would satisfy it. This variant additionally requires the
+ * marker's recorded `name` to match the folder it sits in, so the claim has to
+ * agree with the thing being deleted.
+ */
+async function hasMarkerFor(path, folderName) {
+  try {
+    const text = await readFile(join(path, MARKER_FILE), 'utf8');
+    const record = JSON.parse(text);
+    return record?.tag === MARKER_TAG && record?.name === folderName;
   } catch {
     return false;
   }
@@ -477,7 +500,135 @@ export function apply(ctx, config) {
   };
   const configRouteOff = ctx.webServer.register(configRoute);
 
-  // ---- 4. Session title -> Workspace display title ------------------------
+  // ---- 4. Auto-cleanup empty tasks HTTP route -----------------------------
+  // Called by the Client once a task's session is known to hold no user input.
+  // It deletes the timestamp folder and unwinds the Workspace registration.
+  const cleanupRoute = {
+    kind: 'exact',
+    path: CLEANUP_API_PATH,
+    handler: async (req, res) => {
+      const json = (status, body) => {
+        res.writeHead(status, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'referrer-policy': 'no-referrer',
+        });
+        res.end(JSON.stringify(body));
+      };
+      if (req.method !== 'POST') return json(405, { ok: false, error: 'method-not-allowed' });
+      if (!requestAllowed(ctx, req)) return json(403, { ok: false, error: 'forbidden' });
+
+      try {
+        const body = await readJsonBody(req);
+        const { workspaceId, sessionId, path: taskPath } = body ?? {};
+        if (typeof taskPath !== 'string' || taskPath.trim() === '') {
+          return json(400, { ok: false, error: 'missing-path' });
+        }
+
+        // 1. Ownership. The marker alone is not proof: it is a 30-byte file
+        //    anyone can copy into any directory, and this route recurses with
+        //    `rm -rf`. Require (a) the normalised path to name a directory,
+        //    (b) that directory's own name to be a timestamp this plugin could
+        //    have minted, and (c) a marker whose recorded name matches it.
+        const rawPath = resolve(taskPath.trim());
+        let fullPath;
+        try {
+          fullPath = await realpath(rawPath);
+        } catch {
+          // Already gone: nothing to delete, and the Client should stop
+          // tracking it rather than retry forever.
+          if (typeof workspaceId === 'string') ownedIds.delete(workspaceId.trim());
+          return json(200, { ok: true, cleaned: true, alreadyGone: true });
+        }
+        const folderName = basename(fullPath);
+        if (!TIMESTAMP_DIR_RE.test(folderName)) {
+          return json(400, { ok: false, error: 'not-plugin-owned' });
+        }
+        if (!(await hasMarkerFor(fullPath, folderName))) {
+          return json(400, { ok: false, error: 'not-plugin-owned' });
+        }
+
+        // 2. Cross-check the three inputs against each other. A stale or
+        //    tampered pending entry must not be able to unregister a workspace
+        //    (or archive a session) that has nothing to do with this folder.
+        if (typeof workspaceId !== 'string' || workspaceId.trim() === '') {
+          return json(400, { ok: false, error: 'missing-workspace' });
+        }
+        const wsId = workspaceId.trim();
+        const entity = ctx.workspaceRegistry
+          .list()
+          .find((workspace) => workspace.id === wsId);
+        if (entity === undefined) {
+          // Registration already gone; only the folder is left to remove.
+          return await finishCleanup(fullPath, wsId, undefined, json);
+        }
+        let entityPath;
+        try {
+          entityPath = await realpath(entity.path);
+        } catch {
+          return json(409, { ok: false, error: 'workspace-mismatch' });
+        }
+        if (entityPath !== fullPath) {
+          return json(409, { ok: false, error: 'workspace-mismatch' });
+        }
+        const sid = typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : undefined;
+        if (sid !== undefined) {
+          if (!Array.isArray(entity.sessionIds) || !entity.sessionIds.includes(sid)) {
+            return json(409, { ok: false, error: 'session-mismatch' });
+          }
+        }
+
+        return await finishCleanup(fullPath, wsId, sid, json);
+      } catch (error) {
+        return json(500, { ok: false, error: error?.message ?? String(error) });
+      }
+    },
+  };
+
+  /**
+   * Delete the folder first, then unwind the registry.
+   *
+   * Order is deliberate: `rm` is the only irreversible step, so it runs before
+   * any registry mutation. If it fails (a locked file, an antivirus handle, a
+   * session log still open) nothing has been unregistered yet and the Client's
+   * retry can still succeed; otherwise the folder would be left behind while
+   * the workspace row and session were already gone, which produces a directory
+   * with no way to reach it from the UI.
+   */
+  async function finishCleanup(fullPath, workspaceId, sessionId, json) {
+    try {
+      await rm(fullPath, { recursive: true, force: true, maxRetries: 3 });
+    } catch (rmError) {
+      warn('cleanup deferred: the folder could not be removed', rmError);
+      return json(409, { ok: false, error: 'folder-busy' });
+    }
+
+    if (sessionId !== undefined) {
+      try {
+        await ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true });
+      } catch (archiveError) {
+        warn('archiveSession during cleanup ignored', archiveError);
+      }
+    }
+    try {
+      await ctx.workspaceRegistry.delete(workspaceId);
+    } catch (wsError) {
+      warn('workspaceRegistry.delete during cleanup ignored', wsError);
+    }
+
+    ownedIds.delete(workspaceId);
+    // The marker cache is keyed by Workspace.path, while `fullPath` here is the
+    // realpath handed in by the Client. Clearing the whole map avoids a stale
+    // entry surviving under a key that does not string-match (a Windows path can
+    // differ in case, short-name form, or a trailing dot for the same folder).
+    // The cache only exists to skip a marker read, so dropping it is free.
+    markerCache.clear();
+
+    return json(200, { ok: true, cleaned: true });
+  }
+  const cleanupRouteOff = ctx.webServer.register(cleanupRoute);
+
+  // ---- 5. Session title -> Workspace display title ------------------------
   // session/title is a durable, log-only event; session/event is emitted for
   // every committed append, so this works across resume and replay too.
   const eventOff = ctx.on('session/event', (session, event) => {
@@ -504,6 +655,7 @@ export function apply(ctx, config) {
     yield commandOff;
     yield createRouteOff;
     yield configRouteOff;
+    yield cleanupRouteOff;
     yield eventOff;
   }, 'independent-task lifecycle');
 }

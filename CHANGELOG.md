@@ -4,6 +4,49 @@ All notable changes to this plugin are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-19
+
+### Added
+
+- **Empty tasks clean themselves up.** A task created and left without any user
+  intent is archived, its workspace row is removed, and its timestamp folder is
+  deleted from disk. Nothing to clean out by hand any more.
+- **User intent keeps a task alive.** Typing text, pasting, attaching an image or
+  a file, quoting a message or invoking a command all count as intent: the
+  session stops being a disposable trial and is never auto-deleted, even if you
+  switch to another conversation before sending.
+- **Typed-but-unsent drafts survive navigation.** A plugin-created session whose
+  session row would otherwise be hidden by Harness (blank sessions disappear off
+  focus) now stays in the sidebar once you have typed something into it.
+- New Host route `POST /api/dsh-independent-task/cleanup`, guarded by the same
+  loopback trust fence as the create route.
+
+### Changed
+
+- The cleanup route **fails closed**. The Host's own connection authority is the
+  only authority: a rejection from it is final for this route too, because the
+  route deletes directories. When that service is absent the plugin's own fence
+  requires a same-authority `Origin`, rejects `Sec-Fetch-Site: cross-site`, and
+  accepts only loopback sockets and loopback `Host` headers.
+- Cleanup deletes the folder **first** and unregisters the workspace only after
+  the folder is really gone, so a failed delete leaves a working row instead of
+  an orphan folder with no UI entry. Failures are retried a few times with
+  backoff before the plugin gives up and says so in the console.
+- Ownership is proved, not asserted: the folder name must be a timestamp this
+  plugin could have minted, the marker's recorded `name` must match the folder,
+  the workspace must point at the same real path, and the session must belong to
+  that workspace. A copied marker file no longer makes an arbitrary folder
+  deletable.
+- A session whose surface cannot be read is treated as busy, not as empty.
+
+### Notes
+
+- The plugin only ever **reads** DSH's per-session draft storage
+  (`dsh.conversation.*`); it never writes it. Harness already persists each
+  session's draft, so mirroring it a second time is redundant and was the source
+  of drafts reappearing after a send in some development builds. No such build
+  was ever published, so there is nothing to fix for users of 1.1.0.
+
 ## [1.1.0] - 2026-11-11
 
 ### Added

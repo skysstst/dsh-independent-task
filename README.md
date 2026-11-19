@@ -25,6 +25,9 @@ sidebar (immediately under the native "New session" button). Clicking it:
 4. later renames the Workspace's **display title** to the session's generated
    title — while the physical folder name stays the timestamp.
 
+Tasks you never touch clean themselves up; tasks you type into stay and keep
+their draft.
+
 The root folder is chosen from a small dropdown on that same button
 (`[ 📁 │ ▾ ]`) and then **remembered**, so everyday use is a single click.
 
@@ -72,6 +75,30 @@ The sidebar control is a small **split button**:
 The choice is remembered across restarts, so afterwards you normally just click
 the main button — it keeps using the same folder until you pick another one.
 
+### Empty tasks clean themselves up
+
+A task you create and then abandon does not linger. If you leave the conversation
+without typing anything, the plugin archives the session, removes the workspace
+row and deletes the timestamp folder from disk a few seconds later.
+
+The moment you show any intent, that stops being a disposable task:
+
+- typing text into the composer (even without sending),
+- pasting,
+- attaching an image or a file,
+- quoting a message,
+- invoking a slash command.
+
+From then on the session is a real task: it is never auto-deleted, its row stays
+in the sidebar even while you are looking at another conversation, and an unsent
+draft is still there when you come back. After you **send**, the input box is
+empty again — the plugin does not preserve sent text (DeepSeek Harness persists
+unsent drafts per session on its own; the plugin only ever reads that storage).
+
+Deletion is only ever attempted for folders this plugin created, verified by the
+`.dsh-independent-task.json` marker, and never for a session whose log already
+contains a real user turn.
+
 ### Configuration
 
 Task folder precedence (highest first):
@@ -107,7 +134,8 @@ workspaceRegistry.create(path)  ──▶  sessionController.create({ workspaceI
 - `Workspace.path` is immutable, so title sync goes through `setTitle()` — only
   the display title changes.
 - Only folders carrying the `.dsh-independent-task.json` marker are ever
-  renamed, so the plugin cannot touch workspaces you created yourself.
+  retitled or deleted, so the plugin cannot touch workspaces you created
+  yourself.
 
 ### Robustness details
 
@@ -118,11 +146,41 @@ workspaceRegistry.create(path)  ──▶  sessionController.create({ workspaceI
   fresh folder and any half-registered workspace are removed.
 - **Fast title path**: Workspace ids created by this plugin instance are cached
   in memory, so unrelated `session/title` events cost no filesystem access.
-- **Trust fence**: the HTTP route accepts only loopback sockets with an exact
-  loopback `Host`, refuses `sec-fetch-site: cross-site`, and defers to the
-  Host's own connection authority when present.
-- **Clean unload**: command, route, listener and timers are all registered
-  through `ctx.effect`, so disabling the plugin removes everything.
+- **Trust fence**: the Host's own connection authority is the *only* authority —
+  a rejection from it is final for these routes too. When that service is absent
+  the plugin's own fence requires a same-authority `Origin`, accepts only
+  loopback sockets with an exact loopback `Host`, and refuses
+  `sec-fetch-site: cross-site`. These routes delete directories, so the fence
+  fails closed rather than open.
+- **Cleanup is double-guarded**: the Client only asks to delete a task it
+  believes untouched, and the Host independently re-reads the session surface
+  through `sessionQuery.readSurface()` before deleting anything. A stale pending
+  list in another window can therefore never delete a conversation you are
+  working in — and a surface it cannot read is treated as busy, not as empty.
+- **Cleanup deletes the folder first**: the workspace is unregistered only after
+  the folder is really gone, so a failed delete leaves you a working sidebar row
+  instead of an orphan folder with no way to reach it.
+- **Ownership is proved**: the folder name must be a timestamp this plugin could
+  have minted, the marker's recorded name must match the folder, the workspace
+  must point at the same real path and own the session. Copying the marker file
+  into some other folder does not make it deletable.
+- **Cleanup retries**: a transient failure (Host restarting, a folder briefly
+  locked by the OS) is retried up to three times; an explicit refusal
+  (`session-has-messages`, `not-plugin-owned`, `workspace-mismatch`,
+  `session-mismatch`, `missing-path`) is never retried, because retrying it would
+  only ask the same question again.
+- **No periodic tick**: checks are driven by store events plus a self-terminating
+  watchdog that only runs while a task is tracked, so the plugin does no work in
+  the background once everything has settled.
+- **Read-only towards host state**: the only host mutations are the three writes
+  Harness itself performs when a prompt is accepted (`engagedSessions`,
+  `recordMutation({kind:'engaged'})`, `handleBlank(false)`), issued at most once
+  per session. DSH's draft storage (`dsh.conversation.*`) is only ever read — the
+  one exception is deleting the entry of a session the plugin itself has just
+  removed.
+- **Clean unload**: command, routes, listener, slot registrations and timers are
+  all registered through `ctx.effect` / `ctx.slots.inject`, so disabling the
+  plugin removes everything.
 
 ### Compatibility
 
@@ -143,6 +201,9 @@ workspaceRegistry.create(path)  ──▶  sessionController.create({ workspaceI
 | Nothing happens on click | Open DevTools console; a failing route returns `403 forbidden` (non-loopback) or `500` with the reason. |
 | Folder created, no conversation | The Client roster frame may be late; the plugin waits up to 3 s, then opens anyway. Report the session id shown in the console. |
 | The ▾ does not respond to keyboard | It lives inside the host's decorative icon slot (mouse-only). Right-click the folder icon also opens the menu, and **Settings → Independent tasks → parent path** edits the same value. |
+| A leftover draft came back after sending | Not reproducible in 1.2.0: the plugin never writes draft storage. After upgrading, reload once (`Ctrl+R`) so the new Client module is picked up. If it still happens, it is a Harness-side draft issue and worth reporting upstream. |
+| An empty task folder was not deleted | Console warnings explain the reason: `cleanup refused: session-has-messages` means the session already had a real turn, `not-plugin-owned` means the folder is not provably plugin-owned, `workspace-mismatch` / `session-mismatch` means the record no longer matches the workspace, `cleanup deferred` means it will be retried. |
+| A task disappeared that you wanted to keep | Any typing, paste, attachment or command counts as intent and keeps it — but a task left completely untouched is by design disposable. Recreate it with the button. |
 
 ### License
 
@@ -164,6 +225,8 @@ DeepSeek Harness 默认让所有会话共用同一个工作区；想按任务拆
 2. 把该目录注册为 Workspace；
 3. 在其中创建会话**并直接打开**；
 4. 会话标题生成后，把该 Workspace 的**显示标题**同步成会话标题，磁盘目录名始终是时间戳。
+
+没动过的任务会自动清理；输入过内容的任务会保留，草稿也会留着。
 
 根目录通过同一个按钮上的小三角下拉（`[ 📁 │ ▾ ]`）选择，选完即被**记住**，日常使用就是点一下。
 
@@ -203,6 +266,22 @@ git clone https://github.com/skysstst/dsh-independent-task.git
 
 选择会被持久记住，重启后依然生效。之后通常**直接点主按钮**即可，它会继承上一次的设置，直到你再次通过 ▾ 修改。
 
+### 空任务自动清理
+
+建了就丢下的任务不会一直留着。如果你没输入任何内容就离开这个对话，插件会在几秒后归档该会话、移除工作区行，并把时间戳目录从磁盘删除。
+
+一旦你表现出任何意图，它就不再是可丢弃的临时任务：
+
+- 在输入框里打字（哪怕没发送）；
+- 粘贴内容；
+- 附带图片或文件；
+- 引用消息；
+- 使用斜杠命令。
+
+此后它就是正式任务：绝不会被自动删除，即使你正在看别的对话，它在侧栏的行也不会消失，切回来时未发送的草稿还在。**发送之后**输入框会清空——插件不保留已发送的文本（DeepSeek Harness 本身按会话持久化未发送草稿，插件只读取、从不写入）。
+
+删除只会针对本插件创建的目录（以 `.dsh-independent-task.json` 标记校验），并且绝不会删除日志里已经有真实用户消息的会话。
+
 ### 配置
 
 任务目录优先级（从高到低）：
@@ -218,15 +297,21 @@ git clone https://github.com/skysstst/dsh-independent-task.git
 
 - 会话的 `header.cwd` 由 Host 依据 `workspace.path` 设置，插件不改写、也不重命名磁盘目录。
 - `Workspace.path` 不可变，所以标题同步只走 `setTitle()`，仅改显示标题。
-- 只重命名带 `.dsh-independent-task.json` 标记的目录，绝不会影响你自己建的工作区。
+- 只会删除本插件自己创建的目录（时间戳目录名 + 标记文件内容双重校验），绝不改名、也绝不影响你自己建的工作区。
 
 ### 健壮性
 
 - **同一秒连点**：不加 `_2/_3`，而是等到下一秒重新取时间戳，名字始终干净；5 秒上限防止时钟异常导致挂起。
 - **失败回滚**：注册工作区或创建会话失败时，自动删除刚建的目录与半注册的工作区。
 - **标题快路径**：本实例创建的工作区 id 缓存在内存，其它会话的标题事件不触发任何文件系统访问。
-- **信任围栏**：HTTP 路由只接受回环 socket + 精确回环 `Host`，拒绝 `sec-fetch-site: cross-site`，存在 Host 连接服务时以其为准。
-- **干净卸载**：命令、路由、监听、定时器全部经 `ctx.effect` 注册，禁用插件即全部回收。
+- **信任围栏**：Host 自己的连接服务是**唯一**权威——它拒绝时这些路由也一律拒绝。该服务不可用时，插件自带的围栏要求同源 `Origin`、只接受回环 socket + 精确回环 `Host`，并拒绝 `sec-fetch-site: cross-site`。这些路由会删目录，围栏一律朝「拒绝」方向失败。
+- **清理双重保护**：Client 只在判定「无意图」时请求删除；Host 端还会用 `sessionQuery.readSurface()` 独立复查会话表面再动手。因此另一个窗口里过期的待跟踪列表，绝不可能删掉你正在用的对话——**读不到会话表面时按「有内容」处理**，不按「空」处理。
+- **先删目录再注销**：只有目录真的删掉了才注销工作区，删除失败时你看到的是仍然可用的侧栏行，而不是一个「行没了、目录还在、UI 里点不到」的孤儿目录。
+- **所有权是证明出来的**：目录名必须是本插件可能生成的时间戳、标记文件里记录的名字必须与目录一致、工作区必须指向同一真实路径并且确实拥有该会话。把标记文件复制到别的目录并不能让它变成可删。
+- **清理重试**：瞬时失败（Host 重启、目录被系统短暂占用）最多重试三次；显式拒绝（`session-has-messages`、`not-plugin-owned`、`workspace-mismatch`、`session-mismatch`、`missing-path`）不重试，因为重试只会再问一次同样的问题。
+- **无周期性轮询**：检查由 store 事件驱动，外加一个只在有任务被跟踪时运行的自终止看门狗；一切落定后插件不做任何后台工作。
+- **对宿主状态只读**：唯一的宿主写入是 Harness 自己在接受提示词时做的三件事（`engagedSessions`、`recordMutation({kind:'engaged'})`、`handleBlank(false)`），每会话最多一次。DSH 的草稿存储（`dsh.conversation.*`）只读——唯一的例外是删掉插件自己刚清除的那个会话的条目。
+- **干净卸载**：命令、路由、监听、槽位注册、定时器全部经 `ctx.effect` / `ctx.slots.inject` 注册，禁用插件即全部回收。
 
 ### 故障排查
 
@@ -236,6 +321,9 @@ git clone https://github.com/skysstst/dsh-independent-task.git
 | 点击无反应 | 打开 DevTools 控制台；路由失败会返回 `403 forbidden`（非回环）或 `500` 并附原因。 |
 | 只有文件夹没会话 | Client 名册同步可能延迟；插件最多等 3 秒后仍会尝试打开，可把控制台里的 session id 反馈出来。 |
 | 小三角按键盘没反应 | 它位于宿主的装饰性图标槽内，属于鼠标操作；在文件夹图标上**右键**同样能打开该菜单，也可用「设置 → 独立任务 → 父路径」改同一个值。 |
+| 发送后草稿又冒回来 | 1.2.0 里不会复现：插件不写草稿存储。从旧版升级后请刷新一次页面（`Ctrl+R`）让新 Client 模块生效；若仍出现，那是 Harness 自身的草稿问题，值得向上游反馈。 |
+| 空任务目录没被删掉 | 控制台警告会给出原因：`cleanup refused: session-has-messages` 表示会话已有真实对话，`not-plugin-owned` 表示无法证明目录归插件所有，`workspace-mismatch` / `session-mismatch` 表示记录与工作区已对不上，`cleanup deferred` 表示会重试。 |
+| 想留的任务被删了 | 打字、粘贴、附件、命令都算意图，会保住它；但完全没动过的任务按设计就是一次性的。需要的话用按钮重开一个即可。 |
 
 ### 许可
 

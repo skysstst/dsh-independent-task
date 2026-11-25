@@ -75,6 +75,24 @@ The sidebar control is a small **split button**:
 The choice is remembered across restarts, so afterwards you normally just click
 the main button — it keeps using the same folder until you pick another one.
 
+### Activity-based session grouping & DS Bot filtering
+
+The sidebar workspace list is automatically organized into collapsible activity
+folders, sorted newest-first from top to bottom:
+
+- **Active in 1 day** — expanded by default; new sessions and newly active
+  conversations automatically jump to the top and expand this folder if
+  collapsed.
+- **Active 2–7 days** — collapsed by default, manually expandable.
+- **Inactive** — sessions older than 7 days, collapsed by default.
+- **Hidden (Bot)** — automatically filters DS Bot / IM sessions
+  (`.dsh/bot/workspace`, `.dsh/im`, or `DS Bot` workspace) out of the normal
+  timeline into a dedicated collapsed section.
+
+Click the clock icon in the workspace header to toggle between activity grouping
+and the native workspace view anytime. Native search and right-click / hover
+`...` context menus continue to work seamlessly.
+
 ### Empty tasks clean themselves up
 
 A task you create and then abandon does not linger. If you leave the conversation
@@ -281,6 +299,17 @@ git clone https://github.com/skysstst/dsh-independent-task.git
 此后它就是正式任务：绝不会被自动删除，即使你正在看别的对话，它在侧栏的行也不会消失，切回来时未发送的草稿还在。**发送之后**输入框会清空——插件不保留已发送的文本（DeepSeek Harness 本身按会话持久化未发送草稿，插件只读取、从不写入）。
 
 删除只会针对本插件创建的目录（以 `.dsh-independent-task.json` 标记校验），并且绝不会删除日志里已经有真实用户消息的会话。
+
+### 侧栏活跃度分类收纳与 DS Bot 过滤
+
+左侧工作区列表会自动按会话活跃度收纳为可手动展开/折叠的目录，并按最新对话时间从上到下动态排序：
+
+- **最近 1 天** — 默认展开；一旦新建会话或旧会话产生新对话，会自动跳到最前方并在目录折叠时自动展开跳出。
+- **最近 2~7 天** — 默认收纳，可手动展开/折叠并记住状态。
+- **不活跃** — 7 天以上未对话的会话，默认收纳。
+- **隐藏会话 (Bot)** — 自动将 DS Bot / IM 会话（`.dsh/bot/workspace`、`.dsh/im` 或 `DS Bot` 工作区）从正常时间线过滤到此独立折叠区。
+
+点击工作区标题栏右侧的时钟图标可随时切换回原生工作区视图；搜索框与会话右键 / 悬停 `...` 菜单均与原生行为完全一致。
 
 ### 配置
 

@@ -104,6 +104,7 @@ window.__ModuleLoader__.load({
       bucket1d: 'Active in last 1 day',
       bucket2to7d: 'Active 2–7 days ago',
       bucketInactive: 'Inactive',
+      bucketHidden: 'Hidden sessions (Bot)',
       emptyBucket: 'No sessions',
       newSession: 'New session',
       untitledSession: 'Untitled session',
@@ -134,6 +135,7 @@ window.__ModuleLoader__.load({
       bucket1d: '最近1天内有过对话的',
       bucket2to7d: '最近2~7天有过对话的',
       bucketInactive: '不活跃',
+      bucketHidden: '隐藏会话',
       emptyBucket: '暂无会话',
       newSession: '新会话',
       untitledSession: '未命名会话',
@@ -1169,7 +1171,7 @@ window.__ModuleLoader__.load({
         };
 
         const readGroupExpansion = () => {
-          const defaults = { recent1d: true, recent2to7d: false, inactive: false };
+          const defaults = { recent1d: true, recent2to7d: false, inactive: false, hidden: false };
           try {
             const raw = localStorage.getItem(ACTIVITY_GROUPS_KEY);
             if (!raw) return defaults;
@@ -1178,6 +1180,7 @@ window.__ModuleLoader__.load({
               recent1d: typeof parsed?.recent1d === 'boolean' ? parsed.recent1d : true,
               recent2to7d: typeof parsed?.recent2to7d === 'boolean' ? parsed.recent2to7d : false,
               inactive: typeof parsed?.inactive === 'boolean' ? parsed.inactive : false,
+              hidden: typeof parsed?.hidden === 'boolean' ? parsed.hidden : false,
             };
           } catch {
             return defaults;
@@ -1201,6 +1204,16 @@ window.__ModuleLoader__.load({
           const d = new Date(ts);
           const p = (n) => String(n).padStart(2, '0');
           return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+        };
+
+        const BOT_PATH_RE = /[/\\]\.dsh[/\\](?:bot[/\\]workspace|im)[/\\]?$/i;
+        const isBotSession = (ws, session) => {
+          if (ws) {
+            if (typeof ws.title === 'string' && ws.title.trim().toLowerCase() === 'ds bot') return true;
+            if (typeof ws.path === 'string' && BOT_PATH_RE.test(ws.path.trim())) return true;
+          }
+          if (typeof session?.cwd === 'string' && BOT_PATH_RE.test(session.cwd.trim())) return true;
+          return false;
         };
 
         const workspaceDisplayName = (ws, session) => {
@@ -1295,6 +1308,7 @@ window.__ModuleLoader__.load({
             const recent1d = [];
             const recent2to7d = [];
             const inactive = [];
+            const hidden = [];
             const bucketMap = new Map();
 
             for (const session of Object.values(byId)) {
@@ -1303,13 +1317,15 @@ window.__ModuleLoader__.load({
               const isCurrent = session.id === currentSessionId;
               if (session.blank && !isCurrent) continue;
 
+              const ownerWs = wsBySession.get(session.id);
               const rawTs = Number(session.updatedAt || session.header?.createdAt || 0);
               const isLive = session.running === true || (session.blank === true && isCurrent);
               const lastActiveAt = isLive ? Math.max(rawTs, now) : rawTs;
               const age = lastActiveAt > 0 ? Math.max(0, now - lastActiveAt) : Number.MAX_SAFE_INTEGER;
 
               let bucketKey = 'inactive';
-              if (isLive || age <= DAY_MS) bucketKey = 'recent1d';
+              if (isBotSession(ownerWs, session)) bucketKey = 'hidden';
+              else if (isLive || age <= DAY_MS) bucketKey = 'recent1d';
               else if (age <= WEEK_MS) bucketKey = 'recent2to7d';
 
               bucketMap.set(session.id, bucketKey);
@@ -1320,7 +1336,7 @@ window.__ModuleLoader__.load({
                 title: typeof session.title === 'string' && session.title.trim() !== ''
                   ? session.title.trim()
                   : session.blank ? t('newSession') : t('untitledSession'),
-                workspaceLabel: workspaceDisplayName(wsBySession.get(session.id), session),
+                workspaceLabel: workspaceDisplayName(ownerWs, session),
                 lastActiveAt,
                 running: session.running === true,
                 completed: session.completed === true,
@@ -1330,7 +1346,8 @@ window.__ModuleLoader__.load({
                 timeLabel: formatRelativeTime(lastActiveAt, now),
               };
 
-              if (bucketKey === 'recent1d') recent1d.push(item);
+              if (bucketKey === 'hidden') hidden.push(item);
+              else if (bucketKey === 'recent1d') recent1d.push(item);
               else if (bucketKey === 'recent2to7d') recent2to7d.push(item);
               else inactive.push(item);
             }
@@ -1342,12 +1359,14 @@ window.__ModuleLoader__.load({
             recent1d.sort(sortDesc);
             recent2to7d.sort(sortDesc);
             inactive.sort(sortDesc);
+            hidden.sort(sortDesc);
 
             return {
               buckets: [
                 { key: 'recent1d', label: t('bucket1d'), items: recent1d },
                 { key: 'recent2to7d', label: t('bucket2to7d'), items: recent2to7d },
                 { key: 'inactive', label: t('bucketInactive'), items: inactive },
+                { key: 'hidden', label: t('bucketHidden'), items: hidden },
               ],
               totalCount: recent1d.length + recent2to7d.length + inactive.length,
               nextBucketMap: bucketMap,

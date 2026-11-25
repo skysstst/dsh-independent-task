@@ -1692,6 +1692,7 @@ window.__ModuleLoader__.load({
           let mountedArea = null;
           let hostEl = null;
           let reactRoot = null;
+          let observedRoot = null;
 
           const unmountHost = () => {
             if (reactRoot) {
@@ -1724,10 +1725,27 @@ window.__ModuleLoader__.load({
             return false;
           };
 
+          const isSidebarWide = (area) => {
+            try {
+              const sidebarSnap = ctx.get('layout')?.sidebar?.getSnapshot?.();
+              if (typeof sidebarSnap?.collapsed === 'boolean') return !sidebarSnap.collapsed;
+            } catch {}
+            return area.clientWidth > 80;
+          };
+
+          const observer = new MutationObserver(() => scheduleSync());
+          const attachObserver = (target) => {
+            if (observedRoot === target) return;
+            observer.disconnect();
+            observedRoot = target;
+            if (target) observer.observe(target, { childList: true, subtree: true });
+          };
+
           const syncMount = () => {
             const area = document.querySelector('[data-sidebar-list-area]');
             if (!area) {
               unmountHost();
+              attachObserver(document.body);
               return;
             }
             if (mountedArea !== area) {
@@ -1740,7 +1758,12 @@ window.__ModuleLoader__.load({
                 reactRoot = createRootFn(hostEl);
               }
             }
-            const isWide = area.clientWidth > 80 && area.children.length > 1;
+            // Narrow observation to the sidebar container instead of document.body
+            // so main-view streaming tokens do not trigger sidebar re-syncs.
+            const sidebarContainer = area.closest('aside, nav') ?? area.parentElement ?? document.body;
+            attachObserver(sidebarContainer);
+
+            const isWide = isSidebarWide(area);
             const isSearching = isSidebarSearching(area);
             const element = h(ActivitySessionBrowser, { isWide, isSearching });
             if (reactRoot) {
@@ -1760,15 +1783,19 @@ window.__ModuleLoader__.load({
             }, 50);
           };
 
-          const observer = new MutationObserver(scheduleSync);
-          observer.observe(document.body, { childList: true, subtree: true });
-          window.addEventListener('input', scheduleSync, true);
+          const onHeaderInput = (event) => {
+            if (event.target?.closest?.('[data-sidebar-workspace-header]')) scheduleSync();
+          };
+          const offSidebarLayout = ctx.get('layout')?.sidebar?.subscribe?.(scheduleSync);
+          window.addEventListener('input', onHeaderInput, true);
           window.addEventListener('resize', scheduleSync);
           syncMount();
 
           return () => {
             observer.disconnect();
-            window.removeEventListener('input', scheduleSync, true);
+            observedRoot = null;
+            offSidebarLayout?.();
+            window.removeEventListener('input', onHeaderInput, true);
             window.removeEventListener('resize', scheduleSync);
             unmountHost();
             styleEl?.remove();

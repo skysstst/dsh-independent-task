@@ -98,6 +98,20 @@ window.__ModuleLoader__.load({
       saved: 'Task folder saved: {path}',
       reset: 'Task folder reset to default',
       pickFailed: 'Could not open the folder picker: {reason}',
+      activityMode: 'Activity groups',
+      nativeMode: 'Native view',
+      switchToActivity: 'Group by activity',
+      bucket1d: 'Active in last 1 day',
+      bucket2to7d: 'Active 2–7 days ago',
+      bucketInactive: 'Inactive',
+      emptyBucket: 'No sessions',
+      newSession: 'New session',
+      untitledSession: 'Untitled session',
+      ungroupedWorkspace: 'Ungrouped',
+      justNow: 'Just now',
+      minutesAgo: '{n}m ago',
+      hoursAgo: '{n}h ago',
+      daysAgo: '{n}d ago',
     };
 
     const zh = {
@@ -114,6 +128,20 @@ window.__ModuleLoader__.load({
       saved: '任务目录已保存：{path}',
       reset: '已恢复默认任务目录',
       pickFailed: '无法打开目录选择器：{reason}',
+      activityMode: '按活跃度收纳',
+      nativeMode: '原生视图',
+      switchToActivity: '切换活跃度收纳',
+      bucket1d: '最近1天内有过对话的',
+      bucket2to7d: '最近2~7天有过对话的',
+      bucketInactive: '不活跃',
+      emptyBucket: '暂无会话',
+      newSession: '新会话',
+      untitledSession: '未命名会话',
+      ungroupedWorkspace: '未分组',
+      justNow: '刚刚',
+      minutesAgo: '{n}分钟前',
+      hoursAgo: '{n}小时前',
+      daysAgo: '{n}天前',
     };
 
     return {
@@ -1123,6 +1151,506 @@ window.__ModuleLoader__.load({
             }
           };
         }, 'independent-task auto-cleanup & intent keep-alive');
+
+        // ---- Activity-based session grouping in sidebar ---------------------
+        const ACTIVITY_ENABLED_KEY = 'dsh.independent-task.activity-enabled';
+        const ACTIVITY_GROUPS_KEY = 'dsh.independent-task.activity-groups';
+        const DAY_MS = 24 * 60 * 60 * 1000;
+        const WEEK_MS = 7 * DAY_MS;
+
+        const readBoolStorage = (key, fallback) => {
+          try {
+            const raw = localStorage.getItem(key);
+            if (raw === null) return fallback;
+            return raw === 'true';
+          } catch {
+            return fallback;
+          }
+        };
+
+        const readGroupExpansion = () => {
+          const defaults = { recent1d: true, recent2to7d: false, inactive: false };
+          try {
+            const raw = localStorage.getItem(ACTIVITY_GROUPS_KEY);
+            if (!raw) return defaults;
+            const parsed = JSON.parse(raw);
+            return {
+              recent1d: typeof parsed?.recent1d === 'boolean' ? parsed.recent1d : true,
+              recent2to7d: typeof parsed?.recent2to7d === 'boolean' ? parsed.recent2to7d : false,
+              inactive: typeof parsed?.inactive === 'boolean' ? parsed.inactive : false,
+            };
+          } catch {
+            return defaults;
+          }
+        };
+
+        const saveGroupExpansion = (next) => {
+          try {
+            localStorage.setItem(ACTIVITY_GROUPS_KEY, JSON.stringify(next));
+          } catch {}
+        };
+
+        const formatRelativeTime = (ts, now) => {
+          if (!ts || ts <= 0) return '';
+          const diff = Math.max(0, now - ts);
+          if (diff < 60 * 1000) return t('justNow');
+          if (diff < 60 * 60 * 1000) return t('minutesAgo', { n: Math.floor(diff / (60 * 1000)) });
+          if (diff < DAY_MS) return t('hoursAgo', { n: Math.floor(diff / (60 * 60 * 1000)) });
+          const days = Math.floor(diff / DAY_MS);
+          if (days <= 30) return t('daysAgo', { n: days });
+          const d = new Date(ts);
+          const p = (n) => String(n).padStart(2, '0');
+          return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+        };
+
+        const workspaceDisplayName = (ws, session) => {
+          if (ws) {
+            if (typeof ws.title === 'string' && ws.title.trim() !== '') return ws.title.trim();
+            if (typeof ws.path === 'string' && ws.path.trim() !== '') {
+              const parts = ws.path.split(/[\\/]/).filter(Boolean);
+              if (parts.length > 0) return parts[parts.length - 1];
+            }
+          }
+          if (typeof session?.cwd === 'string' && session.cwd.trim() !== '') {
+            const parts = session.cwd.split(/[\\/]/).filter(Boolean);
+            if (parts.length > 0) return parts[parts.length - 1];
+          }
+          return t('ungroupedWorkspace');
+        };
+
+        const ActivityChevron = ({ expanded }) =>
+          h(
+            'svg',
+            {
+              width: 12,
+              height: 12,
+              viewBox: '0 0 12 12',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 1.6,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              'aria-hidden': true,
+              style: {
+                flexShrink: 0,
+                transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                transition: 'transform 120ms ease',
+              },
+            },
+            h('path', { d: 'M4.5 2.5L8 6l-3.5 3.5' }),
+          );
+
+        const ActivitySessionBrowser = ({ isWide, isSearching }) => {
+          const [enabled, setEnabled] = React.useState(() => readBoolStorage(ACTIVITY_ENABLED_KEY, true));
+          const [expansion, setExpansion] = React.useState(() => readGroupExpansion());
+          const [, setRevision] = React.useState(0);
+          const prevBucketsRef = React.useRef(null);
+
+          React.useEffect(() => {
+            const bump = () => setRevision((v) => v + 1);
+            const offSessions = ctx.get('sessions')?.list?.subscribe?.(bump);
+            const offWorkspaces = ctx.get('workspaces')?.list?.subscribe?.(bump);
+            const offSelection = ctx.uiWorkspace?.selection?.subscribe?.(bump);
+            const offLayout = ctx.get('layout')?.panelInfo?.subscribe?.(bump);
+            const timer = setInterval(bump, 60000);
+            return () => {
+              offSessions?.();
+              offWorkspaces?.();
+              offSelection?.();
+              offLayout?.();
+              clearInterval(timer);
+            };
+          }, []);
+
+          // Sync host list visibility class on [data-sidebar-list-area].
+          React.useEffect(() => {
+            if (typeof document === 'undefined') return;
+            const area = document.querySelector('[data-sidebar-list-area]');
+            if (!area) return;
+            const shouldTakeOver = enabled && isWide && !isSearching;
+            area.classList.toggle('dsh-it-activity-active', shouldTakeOver);
+            return () => {
+              area.classList.remove('dsh-it-activity-active');
+            };
+          }, [enabled, isWide, isSearching]);
+
+          const sessionSnapshot = ctx.get('sessions')?.list?.getSnapshot?.();
+          const workspaceSnapshot = ctx.get('workspaces')?.list?.getSnapshot?.();
+          const currentSessionId = getCurrentSessionId();
+
+          const { buckets, totalCount, nextBucketMap } = React.useMemo(() => {
+            const now = Date.now();
+            const byId = sessionSnapshot?.byId ?? {};
+            const workspaces = Array.isArray(workspaceSnapshot?.items) ? workspaceSnapshot.items : [];
+            const archived = new Set(workspaceSnapshot?.archivedSessionIds ?? []);
+            const pinned = new Set(workspaceSnapshot?.pinnedSessionIds ?? []);
+
+            const wsBySession = new Map();
+            for (const ws of workspaces) {
+              for (const sid of ws.sessionIds ?? []) {
+                if (!wsBySession.has(sid)) wsBySession.set(sid, ws);
+              }
+            }
+
+            const recent1d = [];
+            const recent2to7d = [];
+            const inactive = [];
+            const bucketMap = new Map();
+
+            for (const session of Object.values(byId)) {
+              if (!session || session.origin === 'subagent') continue;
+              if (archived.has(session.id)) continue;
+              const isCurrent = session.id === currentSessionId;
+              if (session.blank && !isCurrent) continue;
+
+              const rawTs = Number(session.updatedAt || session.header?.createdAt || 0);
+              const isLive = session.running === true || (session.blank === true && isCurrent);
+              const lastActiveAt = isLive ? Math.max(rawTs, now) : rawTs;
+              const age = lastActiveAt > 0 ? Math.max(0, now - lastActiveAt) : Number.MAX_SAFE_INTEGER;
+
+              let bucketKey = 'inactive';
+              if (isLive || age <= DAY_MS) bucketKey = 'recent1d';
+              else if (age <= WEEK_MS) bucketKey = 'recent2to7d';
+
+              bucketMap.set(session.id, bucketKey);
+              const item = {
+                id: session.id,
+                rawTitle: typeof session.title === 'string' ? session.title : '',
+                blank: session.blank === true,
+                title: typeof session.title === 'string' && session.title.trim() !== ''
+                  ? session.title.trim()
+                  : session.blank ? t('newSession') : t('untitledSession'),
+                workspaceLabel: workspaceDisplayName(wsBySession.get(session.id), session),
+                lastActiveAt,
+                running: session.running === true,
+                completed: session.completed === true,
+                failed: session.failed === true,
+                pinned: pinned.has(session.id),
+                isCurrent,
+                timeLabel: formatRelativeTime(lastActiveAt, now),
+              };
+
+              if (bucketKey === 'recent1d') recent1d.push(item);
+              else if (bucketKey === 'recent2to7d') recent2to7d.push(item);
+              else inactive.push(item);
+            }
+
+            const sortDesc = (a, b) => {
+              if (a.lastActiveAt !== b.lastActiveAt) return b.lastActiveAt - a.lastActiveAt;
+              return a.id < b.id ? -1 : 1;
+            };
+            recent1d.sort(sortDesc);
+            recent2to7d.sort(sortDesc);
+            inactive.sort(sortDesc);
+
+            return {
+              buckets: [
+                { key: 'recent1d', label: t('bucket1d'), items: recent1d },
+                { key: 'recent2to7d', label: t('bucket2to7d'), items: recent2to7d },
+                { key: 'inactive', label: t('bucketInactive'), items: inactive },
+              ],
+              totalCount: recent1d.length + recent2to7d.length + inactive.length,
+              nextBucketMap: bucketMap,
+            };
+          }, [sessionSnapshot, workspaceSnapshot, currentSessionId]);
+
+          // Auto-jump out of collapsed state when a new session arrives or an
+          // existing session becomes active again (promoted to recent1d).
+          React.useEffect(() => {
+            const prev = prevBucketsRef.current;
+            prevBucketsRef.current = nextBucketMap;
+            if (prev === null) return;
+
+            let shouldExpandRecent = false;
+            for (const [sid, bucket] of nextBucketMap) {
+              if (bucket !== 'recent1d') continue;
+              const prevBucket = prev.get(sid);
+              if (prevBucket === undefined || prevBucket !== 'recent1d') {
+                shouldExpandRecent = true;
+                break;
+              }
+            }
+
+            if (shouldExpandRecent) {
+              setExpansion((curr) => {
+                if (curr.recent1d) return curr;
+                const next = { ...curr, recent1d: true };
+                saveGroupExpansion(next);
+                return next;
+              });
+            }
+          }, [nextBucketMap]);
+
+          if (!isWide || isSearching) return null;
+
+          const toggleEnabled = () => {
+            const next = !enabled;
+            setEnabled(next);
+            try {
+              localStorage.setItem(ACTIVITY_ENABLED_KEY, String(next));
+            } catch {}
+          };
+
+          const toggleBucket = (key) => {
+            setExpansion((curr) => {
+              const next = { ...curr, [key]: !curr[key] };
+              saveGroupExpansion(next);
+              return next;
+            });
+          };
+
+          const openSessionContextMenu = (item, x, y) => {
+            if (item.blank) return;
+            try {
+              ctx.get('contextMenus')?.open?.(
+                { kind: 'session', value: { sessionId: item.id, displayTitle: item.rawTitle } },
+                { x, y },
+              );
+            } catch (err) {
+              console.warn('[independent-task] open context menu failed:', err);
+            }
+          };
+
+          if (!enabled) {
+            return h(
+              'div',
+              { className: 'dsh-it-activity-banner' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-it-mode-btn',
+                  onClick: toggleEnabled,
+                },
+                t('switchToActivity'),
+              ),
+            );
+          }
+
+          return h(
+            'div',
+            { className: 'dsh-it-activity-panel' },
+            h(
+              'div',
+              { className: 'dsh-it-activity-toolbar' },
+              h('span', { className: 'dsh-it-activity-heading' }, `${t('activityMode')} (${totalCount})`),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-it-mode-btn',
+                  onClick: toggleEnabled,
+                },
+                t('nativeMode'),
+              ),
+            ),
+            ...buckets.map((bucket) => {
+              const isExpanded = expansion[bucket.key] === true;
+              return h(
+                'div',
+                { key: bucket.key, className: 'dsh-it-bucket' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-it-bucket-header',
+                    'aria-expanded': isExpanded,
+                    onClick: () => toggleBucket(bucket.key),
+                  },
+                  h(ActivityChevron, { expanded: isExpanded }),
+                  h('span', { className: 'dsh-it-bucket-title' }, bucket.label),
+                  h('span', { className: 'dsh-it-bucket-count' }, String(bucket.items.length)),
+                ),
+                isExpanded &&
+                  h(
+                    'div',
+                    { className: 'dsh-it-bucket-list' },
+                    bucket.items.length === 0
+                      ? h('div', { className: 'dsh-it-empty' }, t('emptyBucket'))
+                      : bucket.items.map((item) =>
+                          h(
+                            'button',
+                            {
+                              key: item.id,
+                              type: 'button',
+                              className: `dsh-it-session-row${item.isCurrent ? ' selected' : ''}`,
+                              title: `${item.title} (${item.workspaceLabel})`,
+                              onClick: () => {
+                                try {
+                                  ctx.uiWorkspace?.openSession?.(item.id);
+                                } catch (err) {
+                                  console.warn('[independent-task] openSession failed:', err);
+                                }
+                              },
+                              onContextMenu: (event) => {
+                                if (item.blank) return;
+                                event.preventDefault();
+                                event.stopPropagation();
+                                const rect = event.clientX === 0 && event.clientY === 0
+                                  ? event.currentTarget.getBoundingClientRect()
+                                  : null;
+                                openSessionContextMenu(
+                                  item,
+                                  rect ? rect.left : event.clientX,
+                                  rect ? rect.bottom : event.clientY,
+                                );
+                              },
+                              onKeyDown: (event) => {
+                                if (item.blank || event.repeat || event.ctrlKey || event.altKey || event.metaKey) return;
+                                if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  const rect = event.currentTarget.getBoundingClientRect();
+                                  openSessionContextMenu(item, rect.left, rect.bottom);
+                                }
+                              },
+                            },
+                            h(
+                              'div',
+                              { className: 'dsh-it-session-top' },
+                              item.running && h('span', { className: 'dsh-it-dot running' }),
+                              !item.running && item.completed && h('span', { className: `dsh-it-dot ${item.failed ? 'failed' : 'done'}` }),
+                              h('span', { className: 'dsh-it-session-title' }, item.title),
+                              item.timeLabel && h('span', { className: 'dsh-it-session-time' }, item.timeLabel),
+                            ),
+                            h('div', { className: 'dsh-it-session-ws' }, item.workspaceLabel),
+                          ),
+                        ),
+                  ),
+              );
+            }),
+          );
+        };
+
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined;
+
+          const styleId = 'dsh-it-activity-styles';
+          let styleEl = document.getElementById(styleId);
+          if (!styleEl) {
+            styleEl = document.createElement('style');
+            styleEl.id = styleId;
+            styleEl.textContent = [
+              '[data-sidebar-list-area].dsh-it-activity-active > :not(.dsh-it-activity-root) { display: none !important; }',
+              '.dsh-it-activity-root { width: 100%; box-sizing: border-box; }',
+              '.dsh-it-activity-banner { display: flex; justify-content: flex-end; padding: 2px 10px 6px; }',
+              '.dsh-it-activity-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 2px 10px 6px; gap: 6px; }',
+              '.dsh-it-activity-heading { font-size: 11px; font-weight: 500; color: var(--dsw-alias-label-tertiary, #8e8e93); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+              '.dsh-it-mode-btn { border: 1px solid var(--dsw-alias-border-l2, rgba(140,140,150,0.25)); background: transparent; color: var(--dsw-alias-label-secondary, #a1a1aa); border-radius: 5px; padding: 2px 7px; font-size: 11px; line-height: 16px; cursor: pointer; flex-shrink: 0; }',
+              '.dsh-it-mode-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.06)); color: var(--dsw-alias-label-primary, #fff); }',
+              '.dsh-it-bucket { margin-bottom: 4px; }',
+              '.dsh-it-bucket-header { display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; padding: 0 10px; border: none; border-radius: var(--dsw-radius-md, 8px); background: transparent; color: var(--dsw-alias-label-secondary, #c9c9cf); font-size: 12px; font-weight: 500; text-align: left; cursor: pointer; box-sizing: border-box; }',
+              '.dsh-it-bucket-header:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.06)); color: var(--dsw-alias-label-primary, #fff); }',
+              '.dsh-it-bucket-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+              '.dsh-it-bucket-count { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8e8e93); flex-shrink: 0; }',
+              '.dsh-it-bucket-list { display: flex; flex-direction: column; gap: 1px; padding: 2px 0 4px 10px; }',
+              '.dsh-it-empty { padding: 4px 10px; font-size: 12px; color: var(--dsw-alias-label-tertiary, #8e8e93); }',
+              '.dsh-it-session-row { display: flex; flex-direction: column; align-items: stretch; gap: 1px; width: 100%; padding: 5px 10px; border: none; border-radius: var(--dsw-radius-md, 8px); background: transparent; color: var(--dsw-alias-label-primary, #fff); text-align: left; cursor: pointer; box-sizing: border-box; }',
+              '.dsh-it-session-row:hover, .dsh-it-session-row.selected { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.08)); }',
+              '.dsh-it-session-top { display: flex; align-items: center; gap: 6px; min-width: 0; }',
+              '.dsh-it-session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 18px; }',
+              '.dsh-it-session-time { flex-shrink: 0; font-size: 11px; color: var(--dsw-alias-label-tertiary, #8e8e93); }',
+              '.dsh-it-session-ws { font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary, #8e8e93); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+              '.dsh-it-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }',
+              '.dsh-it-dot.running { background: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.25); }',
+              '.dsh-it-dot.done { background: #22c55e; }',
+              '.dsh-it-dot.failed { background: #ef4444; }',
+            ].join('\n');
+            document.head.appendChild(styleEl);
+          }
+
+          let createRootFn = null;
+          try {
+            createRootFn = require('react-dom/client')?.createRoot ?? null;
+          } catch {
+            createRootFn = null;
+          }
+
+          let mountedArea = null;
+          let hostEl = null;
+          let reactRoot = null;
+
+          const unmountHost = () => {
+            if (reactRoot) {
+              try {
+                reactRoot.unmount();
+              } catch {}
+              reactRoot = null;
+            } else if (hostEl && typeof ReactDOM.unmountComponentAtNode === 'function') {
+              try {
+                ReactDOM.unmountComponentAtNode(hostEl);
+              } catch {}
+            }
+            if (hostEl) {
+              hostEl.remove();
+              hostEl = null;
+            }
+            if (mountedArea) {
+              mountedArea.classList.remove('dsh-it-activity-active');
+              mountedArea = null;
+            }
+          };
+
+          const isSidebarSearching = (area) => {
+            const container = area?.parentElement;
+            if (!container) return false;
+            const inputs = container.querySelectorAll('input');
+            for (const input of inputs) {
+              if (typeof input.value === 'string' && input.value.trim() !== '') return true;
+            }
+            return false;
+          };
+
+          const syncMount = () => {
+            const area = document.querySelector('[data-sidebar-list-area]');
+            if (!area) {
+              unmountHost();
+              return;
+            }
+            if (mountedArea !== area) {
+              unmountHost();
+              mountedArea = area;
+              hostEl = document.createElement('div');
+              hostEl.className = 'dsh-it-activity-root';
+              area.prepend(hostEl);
+              if (createRootFn) {
+                reactRoot = createRootFn(hostEl);
+              }
+            }
+            const isWide = area.clientWidth > 80 && area.children.length > 1;
+            const isSearching = isSidebarSearching(area);
+            const element = h(ActivitySessionBrowser, { isWide, isSearching });
+            if (reactRoot) {
+              reactRoot.render(element);
+            } else if (typeof ReactDOM.render === 'function') {
+              ReactDOM.render(element, hostEl);
+            }
+          };
+
+          let syncQueued = false;
+          const scheduleSync = () => {
+            if (syncQueued) return;
+            syncQueued = true;
+            later(() => {
+              syncQueued = false;
+              syncMount();
+            }, 50);
+          };
+
+          const observer = new MutationObserver(scheduleSync);
+          observer.observe(document.body, { childList: true, subtree: true });
+          window.addEventListener('input', scheduleSync, true);
+          window.addEventListener('resize', scheduleSync);
+          syncMount();
+
+          return () => {
+            observer.disconnect();
+            window.removeEventListener('input', scheduleSync, true);
+            window.removeEventListener('resize', scheduleSync);
+            unmountHost();
+            styleEl?.remove();
+          };
+        }, 'independent-task activity sidebar');
       },
     };
   },

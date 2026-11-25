@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-independent-task",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "description": "Create a timestamped workspace folder and a session inside it in one click, keep typed drafts alive, delete tasks that were never used, and sync the workspace display title from the generated session title.",

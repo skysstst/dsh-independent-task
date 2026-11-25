@@ -4,6 +4,33 @@ All notable changes to this plugin are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-25
+
+### Added
+
+- **Activity-based sidebar session grouping.** Automatically organizes all
+  sidebar sessions into three collapsible activity folders — **Active in 1 day**
+  (`最近 1 天`), **Active 2–7 days** (`最近 2~7 天`), and **Inactive**
+  (`不活跃`) — with persisted expand/collapse state and newest-first dynamic
+  sorting.
+- **Auto-jump to top on new activity.** Newly created sessions or previously
+  inactive sessions that receive a new turn automatically jump to the top of
+  `Active in 1 day` and expand the folder if it was collapsed.
+- **DS Bot session filtering (`Hidden (Bot)` / `隐藏会话 (Bot)`).**
+  Automatically filters DS Bot / IM sessions (`.dsh/bot/workspace`, `.dsh/im`,
+  or `DS Bot` workspace) out of the normal activity timeline into a dedicated
+  collapsed `Hidden (Bot)` section separated by a divider.
+- **Native context menu & hover actions.** Right-clicking any non-blank session
+  row (or clicking the hover `...` button / pressing `ContextMenu` or
+  `Shift+F10`) opens the full native DeepSeek Harness session context menu.
+- **One-click header toggle & search pass-through.** Adds a compact clock-icon
+  toggle in the workspace header to switch between activity grouping and the
+  native workspace view anytime, and automatically yields to native search
+  results while typing in the sidebar search box.
+- **Unit tests.** Added `test/activity-grouping.test.mjs` covering 24h/7d
+  boundaries, DS Bot filtering, running/blank-session promotion, and workspace
+  subtitle rules.
+
 ## [1.2.0] - 2026-11-19
 
 ### Added

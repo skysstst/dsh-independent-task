@@ -101,10 +101,13 @@ window.__ModuleLoader__.load({
       activityMode: 'Activity groups',
       nativeMode: 'Native view',
       switchToActivity: 'Group by activity',
-      bucket1d: 'Active in last 1 day',
-      bucket2to7d: 'Active 2–7 days ago',
+      toggleToNativeTip: 'Switch to native workspace view',
+      toggleToActivityTip: 'Group sessions by activity',
+      moreActions: 'More actions',
+      bucket1d: 'Active in 1 day',
+      bucket2to7d: 'Active 2–7 days',
       bucketInactive: 'Inactive',
-      bucketHidden: 'Hidden sessions (Bot)',
+      bucketHidden: 'Hidden (Bot)',
       emptyBucket: 'No sessions',
       newSession: 'New session',
       untitledSession: 'Untitled session',
@@ -132,10 +135,13 @@ window.__ModuleLoader__.load({
       activityMode: '按活跃度收纳',
       nativeMode: '原生视图',
       switchToActivity: '切换活跃度收纳',
-      bucket1d: '最近1天内有过对话的',
-      bucket2to7d: '最近2~7天有过对话的',
+      toggleToNativeTip: '切换为原生工作区视图',
+      toggleToActivityTip: '按活跃度分类收纳会话',
+      moreActions: '更多操作',
+      bucket1d: '最近 1 天',
+      bucket2to7d: '最近 2~7 天',
       bucketInactive: '不活跃',
-      bucketHidden: '隐藏会话',
+      bucketHidden: '隐藏会话 (Bot)',
       emptyBucket: '暂无会话',
       newSession: '新会话',
       untitledSession: '未命名会话',
@@ -1318,6 +1324,10 @@ window.__ModuleLoader__.load({
               if (session.blank && !isCurrent) continue;
 
               const ownerWs = wsBySession.get(session.id);
+              const rawTitle = typeof session.title === 'string' ? session.title.trim() : '';
+              const wsLabel = workspaceDisplayName(ownerWs, session);
+              const isTimestampWs = /^\d{4}-\d{2}-\d{2}_\d{6}(?:_\d+)?$/.test(wsLabel);
+              const showWorkspaceSubtitle = !(isTimestampWs && rawTitle !== '');
               const rawTs = Number(session.updatedAt || session.header?.createdAt || 0);
               const isLive = session.running === true || (session.blank === true && isCurrent);
               const lastActiveAt = isLive ? Math.max(rawTs, now) : rawTs;
@@ -1333,10 +1343,11 @@ window.__ModuleLoader__.load({
                 id: session.id,
                 rawTitle: typeof session.title === 'string' ? session.title : '',
                 blank: session.blank === true,
-                title: typeof session.title === 'string' && session.title.trim() !== ''
-                  ? session.title.trim()
+                title: rawTitle !== ''
+                  ? rawTitle
                   : session.blank ? t('newSession') : t('untitledSession'),
-                workspaceLabel: workspaceDisplayName(ownerWs, session),
+                workspaceLabel: wsLabel,
+                showWorkspaceSubtitle,
                 lastActiveAt,
                 running: session.running === true,
                 completed: session.completed === true,
@@ -1430,18 +1441,60 @@ window.__ModuleLoader__.load({
             }
           };
 
+          const headerEl = typeof document !== 'undefined'
+            ? document.querySelector('[data-sidebar-workspace-header]')
+            : null;
+
+          const toggleButton = h(
+            'button',
+            {
+              type: 'button',
+              className: `dsh-it-header-toggle${enabled ? ' active' : ''}`,
+              title: enabled ? t('toggleToNativeTip') : t('toggleToActivityTip'),
+              'aria-label': enabled ? t('toggleToNativeTip') : t('toggleToActivityTip'),
+              'aria-pressed': enabled,
+              onClick: (event) => {
+                event.stopPropagation();
+                toggleEnabled();
+              },
+            },
+            h(
+              'svg',
+              {
+                width: 14,
+                height: 14,
+                viewBox: '0 0 16 16',
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 1.5,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+                'aria-hidden': true,
+              },
+              h('circle', { cx: 8, cy: 8, r: 6 }),
+              h('path', { d: 'M8 4.8V8l2.2 1.4' }),
+            ),
+          );
+
+          const headerPortal = headerEl ? ReactDOM.createPortal(toggleButton, headerEl) : null;
+
           if (!enabled) {
             return h(
-              'div',
-              { className: 'dsh-it-activity-banner' },
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-it-mode-btn',
-                  onClick: toggleEnabled,
-                },
-                t('switchToActivity'),
+              React.Fragment,
+              null,
+              headerPortal,
+              !headerEl && h(
+                'div',
+                { className: 'dsh-it-activity-banner' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-it-mode-btn',
+                    onClick: toggleEnabled,
+                  },
+                  t('switchToActivity'),
+                ),
               ),
             );
           }
@@ -1449,7 +1502,8 @@ window.__ModuleLoader__.load({
           return h(
             'div',
             { className: 'dsh-it-activity-panel' },
-            h(
+            headerPortal,
+            !headerEl && h(
               'div',
               { className: 'dsh-it-activity-toolbar' },
               h('span', { className: 'dsh-it-activity-heading' }, `${t('activityMode')} (${totalCount})`),
@@ -1465,9 +1519,14 @@ window.__ModuleLoader__.load({
             ),
             ...buckets.map((bucket) => {
               const isExpanded = expansion[bucket.key] === true;
+              const isHiddenBucket = bucket.key === 'hidden';
               return h(
                 'div',
-                { key: bucket.key, className: 'dsh-it-bucket' },
+                {
+                  key: bucket.key,
+                  className: `dsh-it-bucket${isHiddenBucket ? ' dsh-it-bucket-hidden' : ''}`,
+                },
+                isHiddenBucket && h('div', { className: 'dsh-it-divider' }),
                 h(
                   'button',
                   {
@@ -1488,10 +1547,11 @@ window.__ModuleLoader__.load({
                       ? h('div', { className: 'dsh-it-empty' }, t('emptyBucket'))
                       : bucket.items.map((item) =>
                           h(
-                            'button',
+                            'div',
                             {
                               key: item.id,
-                              type: 'button',
+                              role: 'button',
+                              tabIndex: 0,
                               className: `dsh-it-session-row${item.isCurrent ? ' selected' : ''}`,
                               title: `${item.title} (${item.workspaceLabel})`,
                               onClick: () => {
@@ -1515,6 +1575,15 @@ window.__ModuleLoader__.load({
                                 );
                               },
                               onKeyDown: (event) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                  event.preventDefault();
+                                  try {
+                                    ctx.uiWorkspace?.openSession?.(item.id);
+                                  } catch (err) {
+                                    console.warn('[independent-task] openSession failed:', err);
+                                  }
+                                  return;
+                                }
                                 if (item.blank || event.repeat || event.ctrlKey || event.altKey || event.metaKey) return;
                                 if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
                                   event.preventDefault();
@@ -1531,8 +1600,35 @@ window.__ModuleLoader__.load({
                               !item.running && item.completed && h('span', { className: `dsh-it-dot ${item.failed ? 'failed' : 'done'}` }),
                               h('span', { className: 'dsh-it-session-title' }, item.title),
                               item.timeLabel && h('span', { className: 'dsh-it-session-time' }, item.timeLabel),
+                              !item.blank && h(
+                                'button',
+                                {
+                                  type: 'button',
+                                  className: 'dsh-it-more-btn',
+                                  title: t('moreActions'),
+                                  'aria-label': t('moreActions'),
+                                  onClick: (event) => {
+                                    event.stopPropagation();
+                                    const rect = event.currentTarget.getBoundingClientRect();
+                                    openSessionContextMenu(item, rect.left, rect.bottom + 4);
+                                  },
+                                },
+                                h(
+                                  'svg',
+                                  {
+                                    width: 14,
+                                    height: 14,
+                                    viewBox: '0 0 16 16',
+                                    fill: 'currentColor',
+                                    'aria-hidden': true,
+                                  },
+                                  h('circle', { cx: 3.5, cy: 8, r: 1.2 }),
+                                  h('circle', { cx: 8, cy: 8, r: 1.2 }),
+                                  h('circle', { cx: 12.5, cy: 8, r: 1.2 }),
+                                ),
+                              ),
                             ),
-                            h('div', { className: 'dsh-it-session-ws' }, item.workspaceLabel),
+                            item.showWorkspaceSubtitle && h('div', { className: 'dsh-it-session-ws' }, item.workspaceLabel),
                           ),
                         ),
                   ),
@@ -1552,24 +1648,32 @@ window.__ModuleLoader__.load({
             styleEl.textContent = [
               '[data-sidebar-list-area].dsh-it-activity-active > :not(.dsh-it-activity-root) { display: none !important; }',
               '.dsh-it-activity-root { width: 100%; box-sizing: border-box; }',
+              '.dsh-it-header-toggle { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-tertiary, #8e8e93); cursor: pointer; flex-shrink: 0; }',
+              '.dsh-it-header-toggle:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.08)); color: var(--dsw-alias-label-primary, #fff); }',
+              '.dsh-it-header-toggle.active { color: var(--dsw-alias-label-primary, #fff); background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.08)); }',
               '.dsh-it-activity-banner { display: flex; justify-content: flex-end; padding: 2px 10px 6px; }',
               '.dsh-it-activity-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 2px 10px 6px; gap: 6px; }',
               '.dsh-it-activity-heading { font-size: 11px; font-weight: 500; color: var(--dsw-alias-label-tertiary, #8e8e93); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
               '.dsh-it-mode-btn { border: 1px solid var(--dsw-alias-border-l2, rgba(140,140,150,0.25)); background: transparent; color: var(--dsw-alias-label-secondary, #a1a1aa); border-radius: 5px; padding: 2px 7px; font-size: 11px; line-height: 16px; cursor: pointer; flex-shrink: 0; }',
               '.dsh-it-mode-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.06)); color: var(--dsw-alias-label-primary, #fff); }',
-              '.dsh-it-bucket { margin-bottom: 4px; }',
-              '.dsh-it-bucket-header { display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; padding: 0 10px; border: none; border-radius: var(--dsw-radius-md, 8px); background: transparent; color: var(--dsw-alias-label-secondary, #c9c9cf); font-size: 12px; font-weight: 500; text-align: left; cursor: pointer; box-sizing: border-box; }',
-              '.dsh-it-bucket-header:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.06)); color: var(--dsw-alias-label-primary, #fff); }',
+              '.dsh-it-bucket { margin-bottom: 2px; }',
+              '.dsh-it-divider { height: 1px; margin: 6px 12px; background: var(--dsw-alias-border-l2, rgba(140,140,150,0.2)); }',
+              '.dsh-it-bucket-header { display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; padding: 0 8px; padding-inline-start: calc(var(--dsh-sidebar-row-padding, 12px) - var(--dsh-sidebar-paint-inset, 8px)); border: none; border-inline: var(--dsh-sidebar-paint-inset, 8px) solid transparent; border-radius: var(--dsw-radius-md, 8px); background: transparent; background-clip: padding-box; color: var(--dsw-alias-label-secondary, #c9c9cf); font-size: 12px; font-weight: 500; text-align: left; cursor: pointer; box-sizing: border-box; }',
+              '.dsh-it-bucket-header:hover { background-color: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.06)); color: var(--dsw-alias-label-primary, #fff); }',
               '.dsh-it-bucket-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
-              '.dsh-it-bucket-count { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8e8e93); flex-shrink: 0; }',
-              '.dsh-it-bucket-list { display: flex; flex-direction: column; gap: 1px; padding: 2px 0 4px 10px; }',
-              '.dsh-it-empty { padding: 4px 10px; font-size: 12px; color: var(--dsw-alias-label-tertiary, #8e8e93); }',
-              '.dsh-it-session-row { display: flex; flex-direction: column; align-items: stretch; gap: 1px; width: 100%; padding: 5px 10px; border: none; border-radius: var(--dsw-radius-md, 8px); background: transparent; color: var(--dsw-alias-label-primary, #fff); text-align: left; cursor: pointer; box-sizing: border-box; }',
-              '.dsh-it-session-row:hover, .dsh-it-session-row.selected { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.08)); }',
-              '.dsh-it-session-top { display: flex; align-items: center; gap: 6px; min-width: 0; }',
-              '.dsh-it-session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 18px; }',
+              '.dsh-it-bucket-count { font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 999px; background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.06)); color: var(--dsw-alias-label-tertiary, #8e8e93); flex-shrink: 0; }',
+              '.dsh-it-bucket-list { display: flex; flex-direction: column; gap: 1px; padding: 2px 0 4px; }',
+              '.dsh-it-empty { padding: 4px 12px 4px 28px; font-size: 12px; color: var(--dsw-alias-label-tertiary, #8e8e93); }',
+              '.dsh-it-session-row { display: flex; flex-direction: column; align-items: stretch; gap: 1px; width: 100%; padding: 5px 8px; padding-inline-start: calc(var(--dsh-sidebar-row-padding, 12px) - var(--dsh-sidebar-paint-inset, 8px) + 12px); border: none; border-inline: var(--dsh-sidebar-paint-inset, 8px) solid transparent; border-radius: var(--dsw-radius-md, 8px); background: transparent; background-clip: padding-box; color: var(--dsw-alias-label-primary, #fff); text-align: left; cursor: pointer; box-sizing: border-box; outline: none; }',
+              '.dsh-it-session-row:hover, .dsh-it-session-row:focus-visible, .dsh-it-session-row.selected { background-color: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.08)); }',
+              '.dsh-it-session-top { display: flex; align-items: center; gap: 6px; min-width: 0; height: 20px; }',
+              '.dsh-it-session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; line-height: 19px; }',
               '.dsh-it-session-time { flex-shrink: 0; font-size: 11px; color: var(--dsw-alias-label-tertiary, #8e8e93); }',
-              '.dsh-it-session-ws { font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary, #8e8e93); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+              '.dsh-it-more-btn { display: none; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary, #c9c9cf); cursor: pointer; flex-shrink: 0; }',
+              '.dsh-it-more-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.12)); color: var(--dsw-alias-label-primary, #fff); }',
+              '.dsh-it-session-row:hover .dsh-it-session-time, .dsh-it-session-row:focus-within .dsh-it-session-time { display: none; }',
+              '.dsh-it-session-row:hover .dsh-it-more-btn, .dsh-it-session-row:focus-within .dsh-it-more-btn { display: inline-flex; }',
+              '.dsh-it-session-ws { font-size: 11px; line-height: 15px; opacity: 0.8; color: var(--dsw-alias-label-tertiary, #8e8e93); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
               '.dsh-it-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }',
               '.dsh-it-dot.running { background: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.25); }',
               '.dsh-it-dot.done { background: #22c55e; }',

@@ -1259,6 +1259,216 @@ window.__ModuleLoader__.load({
             h('path', { d: 'M4.5 2.5L8 6l-3.5 3.5' }),
           );
 
+        const classifyAndSortSessions = ({ sessionSnapshot, workspaceSnapshot, currentSessionId, now }) => {
+          const byId = sessionSnapshot?.byId ?? {};
+          const workspaces = Array.isArray(workspaceSnapshot?.items) ? workspaceSnapshot.items : [];
+          const archived = new Set(workspaceSnapshot?.archivedSessionIds ?? []);
+          const pinned = new Set(workspaceSnapshot?.pinnedSessionIds ?? []);
+
+          const wsBySession = new Map();
+          for (const ws of workspaces) {
+            for (const sid of ws.sessionIds ?? []) {
+              if (!wsBySession.has(sid)) wsBySession.set(sid, ws);
+            }
+          }
+
+          const recent1d = [];
+          const recent2to7d = [];
+          const inactive = [];
+          const hidden = [];
+          const bucketMap = new Map();
+
+          for (const session of Object.values(byId)) {
+            if (!session || session.origin === 'subagent') continue;
+            if (archived.has(session.id)) continue;
+            const isCurrent = session.id === currentSessionId;
+            if (session.blank && !isCurrent) continue;
+
+            const ownerWs = wsBySession.get(session.id);
+            const rawTitle = typeof session.title === 'string' ? session.title.trim() : '';
+            const wsLabel = workspaceDisplayName(ownerWs, session);
+            const isTimestampWs = /^\d{4}-\d{2}-\d{2}_\d{6}(?:_\d+)?$/.test(wsLabel);
+            const showWorkspaceSubtitle = !(isTimestampWs && rawTitle !== '');
+            const rawTs = Number(session.updatedAt || session.header?.createdAt || 0);
+            const isLive = session.running === true || (session.blank === true && isCurrent);
+            const lastActiveAt = isLive ? Math.max(rawTs, now) : rawTs;
+            const age = lastActiveAt > 0 ? Math.max(0, now - lastActiveAt) : Number.MAX_SAFE_INTEGER;
+
+            let bucketKey = 'inactive';
+            if (isBotSession(ownerWs, session)) bucketKey = 'hidden';
+            else if (isLive || age <= DAY_MS) bucketKey = 'recent1d';
+            else if (age <= WEEK_MS) bucketKey = 'recent2to7d';
+
+            bucketMap.set(session.id, bucketKey);
+            const item = {
+              id: session.id,
+              rawTitle: typeof session.title === 'string' ? session.title : '',
+              blank: session.blank === true,
+              title: rawTitle !== ''
+                ? rawTitle
+                : session.blank ? t('newSession') : t('untitledSession'),
+              workspaceLabel: wsLabel,
+              showWorkspaceSubtitle,
+              lastActiveAt,
+              running: session.running === true,
+              completed: session.completed === true,
+              failed: session.failed === true,
+              pinned: pinned.has(session.id),
+              isCurrent,
+              timeLabel: formatRelativeTime(lastActiveAt, now),
+            };
+
+            if (bucketKey === 'hidden') hidden.push(item);
+            else if (bucketKey === 'recent1d') recent1d.push(item);
+            else if (bucketKey === 'recent2to7d') recent2to7d.push(item);
+            else inactive.push(item);
+          }
+
+          const sortDesc = (a, b) => {
+            if (a.lastActiveAt !== b.lastActiveAt) return b.lastActiveAt - a.lastActiveAt;
+            return a.id < b.id ? -1 : 1;
+          };
+          recent1d.sort(sortDesc);
+          recent2to7d.sort(sortDesc);
+          inactive.sort(sortDesc);
+          hidden.sort(sortDesc);
+
+          return {
+            buckets: [
+              { key: 'recent1d', label: t('bucket1d'), items: recent1d },
+              { key: 'recent2to7d', label: t('bucket2to7d'), items: recent2to7d },
+              { key: 'inactive', label: t('bucketInactive'), items: inactive },
+              { key: 'hidden', label: t('bucketHidden'), items: hidden },
+            ],
+            totalCount: recent1d.length + recent2to7d.length + inactive.length,
+            nextBucketMap: bucketMap,
+          };
+        };
+
+        const openSessionRow = (sessionId) => {
+          try {
+            ctx.uiWorkspace?.openSession?.(sessionId);
+          } catch (err) {
+            console.warn('[independent-task] openSession failed:', err);
+          }
+        };
+
+        const openSessionContextMenu = (item, x, y) => {
+          if (item.blank) return;
+          try {
+            ctx.get('contextMenus')?.open?.(
+              { kind: 'session', value: { sessionId: item.id, displayTitle: item.rawTitle } },
+              { x, y },
+            );
+          } catch (err) {
+            console.warn('[independent-task] open context menu failed:', err);
+          }
+        };
+
+        const ActivitySessionRow = ({ item }) =>
+          h(
+            'div',
+            {
+              role: 'button',
+              tabIndex: 0,
+              className: `dsh-it-session-row${item.isCurrent ? ' selected' : ''}`,
+              title: `${item.title} (${item.workspaceLabel})`,
+              onClick: () => openSessionRow(item.id),
+              onContextMenu: (event) => {
+                if (item.blank) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const rect = event.clientX === 0 && event.clientY === 0
+                  ? event.currentTarget.getBoundingClientRect()
+                  : null;
+                openSessionContextMenu(
+                  item,
+                  rect ? rect.left : event.clientX,
+                  rect ? rect.bottom : event.clientY,
+                );
+              },
+              onKeyDown: (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  openSessionRow(item.id);
+                  return;
+                }
+                if (item.blank || event.repeat || event.ctrlKey || event.altKey || event.metaKey) return;
+                if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  openSessionContextMenu(item, rect.left, rect.bottom);
+                }
+              },
+            },
+            h(
+              'div',
+              { className: 'dsh-it-session-top' },
+              item.running && h('span', { className: 'dsh-it-dot running' }),
+              !item.running && item.completed && h('span', { className: `dsh-it-dot ${item.failed ? 'failed' : 'done'}` }),
+              h('span', { className: 'dsh-it-session-title' }, item.title),
+              item.timeLabel && h('span', { className: 'dsh-it-session-time' }, item.timeLabel),
+              !item.blank && h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-it-more-btn',
+                  title: t('moreActions'),
+                  'aria-label': t('moreActions'),
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    openSessionContextMenu(item, rect.left, rect.bottom + 4);
+                  },
+                },
+                h(
+                  'svg',
+                  {
+                    width: 14,
+                    height: 14,
+                    viewBox: '0 0 16 16',
+                    fill: 'currentColor',
+                    'aria-hidden': true,
+                  },
+                  h('circle', { cx: 3.5, cy: 8, r: 1.2 }),
+                  h('circle', { cx: 8, cy: 8, r: 1.2 }),
+                  h('circle', { cx: 12.5, cy: 8, r: 1.2 }),
+                ),
+              ),
+            ),
+            item.showWorkspaceSubtitle && h('div', { className: 'dsh-it-session-ws' }, item.workspaceLabel),
+          );
+
+        const ActivityBucketSection = ({ bucket, isExpanded, onToggle }) => {
+          const isHiddenBucket = bucket.key === 'hidden';
+          return h(
+            'div',
+            { className: `dsh-it-bucket${isHiddenBucket ? ' dsh-it-bucket-hidden' : ''}` },
+            isHiddenBucket && h('div', { className: 'dsh-it-divider' }),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-it-bucket-header',
+                'aria-expanded': isExpanded,
+                onClick: () => onToggle(bucket.key),
+              },
+              h(ActivityChevron, { expanded: isExpanded }),
+              h('span', { className: 'dsh-it-bucket-title' }, bucket.label),
+              h('span', { className: 'dsh-it-bucket-count' }, String(bucket.items.length)),
+            ),
+            isExpanded &&
+              h(
+                'div',
+                { className: 'dsh-it-bucket-list' },
+                bucket.items.length === 0
+                  ? h('div', { className: 'dsh-it-empty' }, t('emptyBucket'))
+                  : bucket.items.map((item) => h(ActivitySessionRow, { key: item.id, item })),
+              ),
+          );
+        };
+
         const ActivitySessionBrowser = ({ isWide, isSearching }) => {
           const [enabled, setEnabled] = React.useState(() => readBoolStorage(ACTIVITY_ENABLED_KEY, true));
           const [expansion, setExpansion] = React.useState(() => readGroupExpansion());
@@ -1297,92 +1507,15 @@ window.__ModuleLoader__.load({
           const workspaceSnapshot = ctx.get('workspaces')?.list?.getSnapshot?.();
           const currentSessionId = getCurrentSessionId();
 
-          const { buckets, totalCount, nextBucketMap } = React.useMemo(() => {
-            const now = Date.now();
-            const byId = sessionSnapshot?.byId ?? {};
-            const workspaces = Array.isArray(workspaceSnapshot?.items) ? workspaceSnapshot.items : [];
-            const archived = new Set(workspaceSnapshot?.archivedSessionIds ?? []);
-            const pinned = new Set(workspaceSnapshot?.pinnedSessionIds ?? []);
-
-            const wsBySession = new Map();
-            for (const ws of workspaces) {
-              for (const sid of ws.sessionIds ?? []) {
-                if (!wsBySession.has(sid)) wsBySession.set(sid, ws);
-              }
-            }
-
-            const recent1d = [];
-            const recent2to7d = [];
-            const inactive = [];
-            const hidden = [];
-            const bucketMap = new Map();
-
-            for (const session of Object.values(byId)) {
-              if (!session || session.origin === 'subagent') continue;
-              if (archived.has(session.id)) continue;
-              const isCurrent = session.id === currentSessionId;
-              if (session.blank && !isCurrent) continue;
-
-              const ownerWs = wsBySession.get(session.id);
-              const rawTitle = typeof session.title === 'string' ? session.title.trim() : '';
-              const wsLabel = workspaceDisplayName(ownerWs, session);
-              const isTimestampWs = /^\d{4}-\d{2}-\d{2}_\d{6}(?:_\d+)?$/.test(wsLabel);
-              const showWorkspaceSubtitle = !(isTimestampWs && rawTitle !== '');
-              const rawTs = Number(session.updatedAt || session.header?.createdAt || 0);
-              const isLive = session.running === true || (session.blank === true && isCurrent);
-              const lastActiveAt = isLive ? Math.max(rawTs, now) : rawTs;
-              const age = lastActiveAt > 0 ? Math.max(0, now - lastActiveAt) : Number.MAX_SAFE_INTEGER;
-
-              let bucketKey = 'inactive';
-              if (isBotSession(ownerWs, session)) bucketKey = 'hidden';
-              else if (isLive || age <= DAY_MS) bucketKey = 'recent1d';
-              else if (age <= WEEK_MS) bucketKey = 'recent2to7d';
-
-              bucketMap.set(session.id, bucketKey);
-              const item = {
-                id: session.id,
-                rawTitle: typeof session.title === 'string' ? session.title : '',
-                blank: session.blank === true,
-                title: rawTitle !== ''
-                  ? rawTitle
-                  : session.blank ? t('newSession') : t('untitledSession'),
-                workspaceLabel: wsLabel,
-                showWorkspaceSubtitle,
-                lastActiveAt,
-                running: session.running === true,
-                completed: session.completed === true,
-                failed: session.failed === true,
-                pinned: pinned.has(session.id),
-                isCurrent,
-                timeLabel: formatRelativeTime(lastActiveAt, now),
-              };
-
-              if (bucketKey === 'hidden') hidden.push(item);
-              else if (bucketKey === 'recent1d') recent1d.push(item);
-              else if (bucketKey === 'recent2to7d') recent2to7d.push(item);
-              else inactive.push(item);
-            }
-
-            const sortDesc = (a, b) => {
-              if (a.lastActiveAt !== b.lastActiveAt) return b.lastActiveAt - a.lastActiveAt;
-              return a.id < b.id ? -1 : 1;
-            };
-            recent1d.sort(sortDesc);
-            recent2to7d.sort(sortDesc);
-            inactive.sort(sortDesc);
-            hidden.sort(sortDesc);
-
-            return {
-              buckets: [
-                { key: 'recent1d', label: t('bucket1d'), items: recent1d },
-                { key: 'recent2to7d', label: t('bucket2to7d'), items: recent2to7d },
-                { key: 'inactive', label: t('bucketInactive'), items: inactive },
-                { key: 'hidden', label: t('bucketHidden'), items: hidden },
-              ],
-              totalCount: recent1d.length + recent2to7d.length + inactive.length,
-              nextBucketMap: bucketMap,
-            };
-          }, [sessionSnapshot, workspaceSnapshot, currentSessionId]);
+          const { buckets, totalCount, nextBucketMap } = React.useMemo(
+            () => classifyAndSortSessions({
+              sessionSnapshot,
+              workspaceSnapshot,
+              currentSessionId,
+              now: Date.now(),
+            }),
+            [sessionSnapshot, workspaceSnapshot, currentSessionId],
+          );
 
           // Auto-jump out of collapsed state when a new session arrives or an
           // existing session becomes active again (promoted to recent1d).
@@ -1427,18 +1560,6 @@ window.__ModuleLoader__.load({
               saveGroupExpansion(next);
               return next;
             });
-          };
-
-          const openSessionContextMenu = (item, x, y) => {
-            if (item.blank) return;
-            try {
-              ctx.get('contextMenus')?.open?.(
-                { kind: 'session', value: { sessionId: item.id, displayTitle: item.rawTitle } },
-                { x, y },
-              );
-            } catch (err) {
-              console.warn('[independent-task] open context menu failed:', err);
-            }
           };
 
           const headerEl = typeof document !== 'undefined'
@@ -1517,123 +1638,14 @@ window.__ModuleLoader__.load({
                 t('nativeMode'),
               ),
             ),
-            ...buckets.map((bucket) => {
-              const isExpanded = expansion[bucket.key] === true;
-              const isHiddenBucket = bucket.key === 'hidden';
-              return h(
-                'div',
-                {
-                  key: bucket.key,
-                  className: `dsh-it-bucket${isHiddenBucket ? ' dsh-it-bucket-hidden' : ''}`,
-                },
-                isHiddenBucket && h('div', { className: 'dsh-it-divider' }),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'dsh-it-bucket-header',
-                    'aria-expanded': isExpanded,
-                    onClick: () => toggleBucket(bucket.key),
-                  },
-                  h(ActivityChevron, { expanded: isExpanded }),
-                  h('span', { className: 'dsh-it-bucket-title' }, bucket.label),
-                  h('span', { className: 'dsh-it-bucket-count' }, String(bucket.items.length)),
-                ),
-                isExpanded &&
-                  h(
-                    'div',
-                    { className: 'dsh-it-bucket-list' },
-                    bucket.items.length === 0
-                      ? h('div', { className: 'dsh-it-empty' }, t('emptyBucket'))
-                      : bucket.items.map((item) =>
-                          h(
-                            'div',
-                            {
-                              key: item.id,
-                              role: 'button',
-                              tabIndex: 0,
-                              className: `dsh-it-session-row${item.isCurrent ? ' selected' : ''}`,
-                              title: `${item.title} (${item.workspaceLabel})`,
-                              onClick: () => {
-                                try {
-                                  ctx.uiWorkspace?.openSession?.(item.id);
-                                } catch (err) {
-                                  console.warn('[independent-task] openSession failed:', err);
-                                }
-                              },
-                              onContextMenu: (event) => {
-                                if (item.blank) return;
-                                event.preventDefault();
-                                event.stopPropagation();
-                                const rect = event.clientX === 0 && event.clientY === 0
-                                  ? event.currentTarget.getBoundingClientRect()
-                                  : null;
-                                openSessionContextMenu(
-                                  item,
-                                  rect ? rect.left : event.clientX,
-                                  rect ? rect.bottom : event.clientY,
-                                );
-                              },
-                              onKeyDown: (event) => {
-                                if (event.key === 'Enter' || event.key === ' ') {
-                                  event.preventDefault();
-                                  try {
-                                    ctx.uiWorkspace?.openSession?.(item.id);
-                                  } catch (err) {
-                                    console.warn('[independent-task] openSession failed:', err);
-                                  }
-                                  return;
-                                }
-                                if (item.blank || event.repeat || event.ctrlKey || event.altKey || event.metaKey) return;
-                                if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                  const rect = event.currentTarget.getBoundingClientRect();
-                                  openSessionContextMenu(item, rect.left, rect.bottom);
-                                }
-                              },
-                            },
-                            h(
-                              'div',
-                              { className: 'dsh-it-session-top' },
-                              item.running && h('span', { className: 'dsh-it-dot running' }),
-                              !item.running && item.completed && h('span', { className: `dsh-it-dot ${item.failed ? 'failed' : 'done'}` }),
-                              h('span', { className: 'dsh-it-session-title' }, item.title),
-                              item.timeLabel && h('span', { className: 'dsh-it-session-time' }, item.timeLabel),
-                              !item.blank && h(
-                                'button',
-                                {
-                                  type: 'button',
-                                  className: 'dsh-it-more-btn',
-                                  title: t('moreActions'),
-                                  'aria-label': t('moreActions'),
-                                  onClick: (event) => {
-                                    event.stopPropagation();
-                                    const rect = event.currentTarget.getBoundingClientRect();
-                                    openSessionContextMenu(item, rect.left, rect.bottom + 4);
-                                  },
-                                },
-                                h(
-                                  'svg',
-                                  {
-                                    width: 14,
-                                    height: 14,
-                                    viewBox: '0 0 16 16',
-                                    fill: 'currentColor',
-                                    'aria-hidden': true,
-                                  },
-                                  h('circle', { cx: 3.5, cy: 8, r: 1.2 }),
-                                  h('circle', { cx: 8, cy: 8, r: 1.2 }),
-                                  h('circle', { cx: 12.5, cy: 8, r: 1.2 }),
-                                ),
-                              ),
-                            ),
-                            item.showWorkspaceSubtitle && h('div', { className: 'dsh-it-session-ws' }, item.workspaceLabel),
-                          ),
-                        ),
-                  ),
-              );
-            }),
+            ...buckets.map((bucket) =>
+              h(ActivityBucketSection, {
+                key: bucket.key,
+                bucket,
+                isExpanded: expansion[bucket.key] === true,
+                onToggle: toggleBucket,
+              }),
+            ),
           );
         };
 
